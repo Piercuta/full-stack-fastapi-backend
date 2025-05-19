@@ -1,6 +1,10 @@
 import secrets
 import warnings
 from typing import Annotated, Any, Literal
+from urllib.parse import quote_plus
+import json
+import boto3
+from botocore.exceptions import ClientError
 
 from pydantic import (
     AnyUrl,
@@ -56,14 +60,34 @@ class Settings(BaseSettings):
     POSTGRES_USER: str
     POSTGRES_PASSWORD: str = ""
     POSTGRES_DB: str = ""
+    AWS_SECRET_NAME: str | None = None
+    AWS_REGION: str = "eu-west-1"
+
+    def _get_secret(self) -> str:
+        if not self.AWS_SECRET_NAME:
+            return self.POSTGRES_PASSWORD
+
+        try:
+            session = boto3.session.Session()
+            client = session.client(
+                service_name='secretsmanager',
+                region_name=self.AWS_REGION
+            )
+            response = client.get_secret_value(SecretId=self.AWS_SECRET_NAME)
+            secret = json.loads(response['SecretString'])
+            return secret.get('password', self.POSTGRES_PASSWORD)
+        except ClientError as e:
+            warnings.warn(f"Failed to retrieve secret from AWS: {str(e)}")
+            return self.POSTGRES_PASSWORD
 
     @computed_field  # type: ignore[prop-decorator]
     @property
     def SQLALCHEMY_DATABASE_URI(self) -> PostgresDsn:
+        password = self._get_secret()
         return MultiHostUrl.build(
             scheme="postgresql+psycopg",
             username=self.POSTGRES_USER,
-            password=self.POSTGRES_PASSWORD,
+            password=quote_plus(password),
             host=self.POSTGRES_SERVER,
             port=self.POSTGRES_PORT,
             path=self.POSTGRES_DB,
