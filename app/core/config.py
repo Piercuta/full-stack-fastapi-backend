@@ -60,11 +60,11 @@ class Settings(BaseSettings):
     POSTGRES_USER: str
     POSTGRES_PASSWORD: str = ""
     POSTGRES_DB: str = ""
-    AWS_SECRET_NAME: str | None = None
+    AWS_SECRET_ARN: str | None = None
     AWS_REGION: str = "eu-west-1"
 
     def _get_secret(self) -> str:
-        if not self.AWS_SECRET_NAME:
+        if not self.AWS_SECRET_ARN:
             return self.POSTGRES_PASSWORD
 
         try:
@@ -73,7 +73,7 @@ class Settings(BaseSettings):
                 service_name='secretsmanager',
                 region_name=self.AWS_REGION
             )
-            response = client.get_secret_value(SecretId=self.AWS_SECRET_NAME)
+            response = client.get_secret_value(SecretId=self.AWS_SECRET_ARN)
             secret = json.loads(response['SecretString'])
             return secret.get('password', self.POSTGRES_PASSWORD)
         except ClientError as e:
