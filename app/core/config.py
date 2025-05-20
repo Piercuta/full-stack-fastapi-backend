@@ -78,6 +78,7 @@ class Settings(BaseSettings):
             response = client.get_secret_value(SecretId=self.AWS_SECRET_ARN)
             secret = json.loads(response['SecretString'])
             print(f"[DEBUG] Secret récupéré: {secret}")
+            print(f"[TOTO] Secret récupéré: {secret}")
             return secret.get('password', self.POSTGRES_PASSWORD)
         except Exception as e:
             print(f"[ERROR] Impossible de récupérer le secret : {e}")
