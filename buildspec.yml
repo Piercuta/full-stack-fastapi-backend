@@ -1,0 +1,32 @@
+version: 0.2
+
+env:
+  shell: bash
+
+phases:
+  pre_build:
+    commands:
+      - echo "Logging in to Amazon ECR..."
+      - aws ecr get-login-password --region $AWS_DEFAULT_REGION | docker login --username AWS --password-stdin $ECR_REPOSITORY_URI
+      - |
+        echo "Branch name : $BRANCH_NAME"
+        IMAGE_TAG="${BRANCH_NAME}"
+        echo "Image tag : $IMAGE_TAG"
+  build:
+    commands:
+      - echo "Building Docker image..."
+      - |
+        docker build -t $ECR_REPOSITORY_URI:$IMAGE_TAG .
+        docker tag $ECR_REPOSITORY_URI:$IMAGE_TAG $ECR_REPOSITORY_URI:latest
+  post_build:
+    commands:
+      - echo "Pushing images to ECR..."
+      - |
+        docker push $ECR_REPOSITORY_URI:$IMAGE_TAG
+        docker push $ECR_REPOSITORY_URI:latest
+      - echo "Forcing ECS service redeployment..."
+      - |
+        aws ecs update-service \
+          --cluster $ECS_CLUSTER_NAME \
+          --service $ECS_SERVICE_NAME \
+          --force-new-deployment
