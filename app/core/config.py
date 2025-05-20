@@ -65,9 +65,11 @@ class Settings(BaseSettings):
 
     def _get_secret(self) -> str:
         if not self.AWS_SECRET_ARN:
+            print("[DEBUG] Pas de AWS_SECRET_ARN, fallback POSTGRES_PASSWORD")
             return self.POSTGRES_PASSWORD
 
         try:
+            print(f"[DEBUG] Tentative de lecture du secret: {self.AWS_SECRET_ARN}")
             session = boto3.session.Session()
             client = session.client(
                 service_name='secretsmanager',
@@ -75,9 +77,10 @@ class Settings(BaseSettings):
             )
             response = client.get_secret_value(SecretId=self.AWS_SECRET_ARN)
             secret = json.loads(response['SecretString'])
+            print(f"[DEBUG] Secret récupéré: {secret}")
             return secret.get('password', self.POSTGRES_PASSWORD)
-        except ClientError as e:
-            warnings.warn(f"Failed to retrieve secret from AWS: {str(e)}")
+        except Exception as e:
+            print(f"[ERROR] Impossible de récupérer le secret : {e}")
             return self.POSTGRES_PASSWORD
 
     @computed_field  # type: ignore[prop-decorator]
