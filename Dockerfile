@@ -1,4 +1,4 @@
-FROM public.ecr.aws/docker/library/python:3.10
+FROM public.ecr.aws/docker/library/python:3.10-slim
 
 ENV PYTHONUNBUFFERED=1
 
@@ -40,4 +40,4 @@ COPY ./app /app/app
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync
 
-CMD ["fastapi", "run", "--workers", "4", "app/main.py"]
+CMD ["fastapi", "run", "--workers", "2", "app/main.py"]
