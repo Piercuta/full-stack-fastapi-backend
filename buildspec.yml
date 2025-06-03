@@ -30,3 +30,8 @@ phases:
           --cluster $ECS_CLUSTER_NAME \
           --service $ECS_SERVICE_NAME \
           --force-new-deployment
+# manual cmd
+# aws ecr --profile piercuta-dev get-login-password --region eu-west-1 | docker login --username AWS --password-stdin 532673134317.dkr.ecr.eu-west-1.amazonaws.com/services/ecs/fastapi_app
+# docker build -t 532673134317.dkr.ecr.eu-west-1.amazonaws.com/services/ecs/fastapi_app:staging .
+# docker tags 532673134317.dkr.ecr.eu-west-1.amazonaws.com/services/ecs/fastapi_app:staging 532673134317.dkr.ecr.eu-west-1.amazonaws.com/services/ecs/fastapi_app:latest
+# docker push 532673134317.dkr.ecr.eu-west-1.amazonaws.com/services/ecs/fastapi_app:staging
