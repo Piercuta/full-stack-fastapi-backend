@@ -1,0 +1,43 @@
+version: 0.2
+env:
+  shell: bash
+
+phases:
+  install:
+    commands:
+      - echo Installing kubectl...
+      - curl -O https://s3.us-west-2.amazonaws.com/amazon-eks/1.32.3/2025-04-17/bin/linux/amd64/kubectl
+      - chmod +x ./kubectl
+      - mv ./kubectl /usr/local/bin
+      - kubectl version --client
+  pre_build:
+    commands:
+
+      - echo "Logging in to Amazon ECR..."
+      - aws ecr get-login-password --region $AWS_DEFAULT_REGION | docker login --username AWS --password-stdin $ECR_REPOSITORY_URI
+      - |
+        echo "Branch name : $BRANCH_NAME"
+        IMAGE_TAG="${BRANCH_NAME}"
+        echo "Image tag : $IMAGE_TAG"
+  build:
+    commands:
+      - echo "Building Docker image..."
+      - |
+        docker build -t $ECR_REPOSITORY_URI:$IMAGE_TAG .
+        docker tag $ECR_REPOSITORY_URI:$IMAGE_TAG $ECR_REPOSITORY_URI:latest
+  post_build:
+    commands:
+      - echo "Pushing images to ECR..."
+      - |
+        docker push $ECR_REPOSITORY_URI:$IMAGE_TAG
+        docker push $ECR_REPOSITORY_URI:latest
+      - echo "Forcing ECS service redeployment..."
+      - |
+        aws eks update-kubeconfig --name $EKS_CLUSTER_NAME --region $AWS_DEFAULT_REGION
+        kubectl rollout restart deployment $EKS_DEPLOYMENT_NAME -n fastapi
+
+# manual cmd
+# aws ecr --profile piercuta-dev get-login-password --region eu-west-1 | docker login --username AWS --password-stdin 532673134317.dkr.ecr.eu-west-1.amazonaws.com/services/ecs/fastapi_app
+# docker build -t 532673134317.dkr.ecr.eu-west-1.amazonaws.com/services/ecs/fastapi_app:staging .
+# docker tags 532673134317.dkr.ecr.eu-west-1.amazonaws.com/services/ecs/fastapi_app:staging 532673134317.dkr.ecr.eu-west-1.amazonaws.com/services/ecs/fastapi_app:latest
+# docker push 532673134317.dkr.ecr.eu-west-1.amazonaws.com/services/ecs/fastapi_app:staging
