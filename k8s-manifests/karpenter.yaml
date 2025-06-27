@@ -16,8 +16,8 @@ spec:
     - tags:
         karpenter.sh/discovery-fastapi: ${CLUSTER_NAME}
   amiFamily: AL2023
-  # amiSelectorTerms:
-  #   - id: ami-0b35c4822c5d53575
+  amiSelectorTerms:
+    - alias: al2023@v20250620
   tags:
     Name: ${PROJECT_NAME}-${ENV_NAME}-fastapi-node
     App: fastapi
@@ -46,17 +46,26 @@ spec:
         kind: EC2NodeClass
         name: fastapi-node-class
       requirements:
-        - key: karpenter.k8s.aws/instance-category
+        - key: kubernetes.io/arch
           operator: In
-          values:
-            - c
-            - m
-            - r
-        - key: karpenter.k8s.aws/instance-generation
-          operator: Gt
-          values:
-            - "2"
+          values: ["amd64"]
+        - key: kubernetes.io/os
+          operator: In
+          values: ["linux"]
         - key: karpenter.sh/capacity-type
           operator: In
-          values:
-            - on-demand
+          values: ["on-demand"]
+        - key: karpenter.k8s.aws/instance-category
+          operator: In
+          values: ["c", "m", "r"]
+        - key: karpenter.k8s.aws/instance-generation
+          operator: Gt
+          values: ["2"]
+      expireAfter: 720h # 30 * 24h = 720h
+      # kubelet:
+      #   failSwapOn: false
+  limits:
+    cpu: 1000
+  disruption:
+    consolidationPolicy: WhenEmptyOrUnderutilized
+    consolidateAfter: 1m
