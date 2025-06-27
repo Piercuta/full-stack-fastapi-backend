@@ -16,8 +16,8 @@ spec:
     - tags:
         karpenter.sh/discovery-fastapi: ${CLUSTER_NAME}
   amiFamily: AL2023
-  amiSelectorTerms:
-    - id: ami-0b35c4822c5d53575
+  # amiSelectorTerms:
+  #   - id: ami-0b35c4822c5d53575
   tags:
     Name: ${PROJECT_NAME}-${ENV_NAME}-fastapi-node
     App: fastapi
