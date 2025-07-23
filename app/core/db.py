@@ -3,9 +3,19 @@ from sqlmodel import Session, create_engine, select
 from app import crud
 from app.core.config import settings
 from app.models import User, UserCreate
+# create_engine
+# engine = (str(settings.SQLALCHEMY_DATABASE_URI))
 
-engine = create_engine(str(settings.SQLALCHEMY_DATABASE_URI))
 
+# Crée l'engine avec une configuration de pool explicite
+engine = create_engine(
+    str(settings.SQLALCHEMY_DATABASE_URI),
+    pool_size=20,           # nombre max de connexions persistantes
+    max_overflow=30,        # connexions supplémentaires temporaires si pool saturé
+    pool_timeout=30,        # temps max pour attendre une connexion avant timeout (en sec)
+    pool_recycle=1800,      # recycle les connexions après X secondes pour éviter timeout réseau
+    echo=False              # passe à True si tu veux loguer toutes les requêtes SQL
+)
 
 # make sure all SQLModel models are imported (app.models) before initializing DB
 # otherwise, SQLModel might fail to initialize relationships properly
