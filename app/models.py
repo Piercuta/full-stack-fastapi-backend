@@ -1,5 +1,6 @@
 import uuid
 
+from fastapi import UploadFile
 from pydantic import EmailStr
 from sqlmodel import Field, Relationship, SQLModel
 
@@ -10,6 +11,7 @@ class UserBase(SQLModel):
     is_active: bool = True
     is_superuser: bool = False
     full_name: str | None = Field(default=None, max_length=255)
+    avatar_url: str | None = Field(default=None, max_length=500)  # ← AJOUTER CETTE LIGNE
 
 
 # Properties to receive via API on creation
@@ -32,6 +34,7 @@ class UserUpdate(UserBase):
 class UserUpdateMe(SQLModel):
     full_name: str | None = Field(default=None, max_length=255)
     email: EmailStr | None = Field(default=None, max_length=255)
+    avatar_url: str | None = Field(default=None, max_length=500)  # ← AJOUTER CETTE LIGNE
 
 
 class UpdatePassword(SQLModel):
@@ -111,3 +114,16 @@ class TokenPayload(SQLModel):
 class NewPassword(SQLModel):
     token: str
     new_password: str = Field(min_length=8, max_length=40)
+
+# 3. Ajouter un nouveau modèle pour l'upload d'avatar
+
+
+class AvatarUpload(SQLModel):
+    file: UploadFile  # Ceci sera géré dans la route, pas dans le modèle
+
+# 4. Ajouter un modèle pour la réponse d'upload
+
+
+class AvatarResponse(SQLModel):
+    avatar_url: str
+    message: str = "Avatar uploaded successfully"

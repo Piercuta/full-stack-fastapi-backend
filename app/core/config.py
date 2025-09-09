@@ -63,6 +63,11 @@ class Settings(BaseSettings):
     AWS_SECRET_ARN: str | None = None
     AWS_REGION: str = "eu-west-1"
 
+    # File Service Configuration
+    FILE_SERVICE_URL: str = "http://file-service-svc.file-service.svc.cluster.local"
+    MAX_AVATAR_SIZE: int = 5 * 1024 * 1024  # 5MB
+    ALLOWED_AVATAR_TYPES: list[str] = ["image/jpeg", "image/png", "image/gif", "image/webp"]
+
     def _get_secret(self) -> str:
         if not self.AWS_SECRET_ARN:
             print("[DEBUG] Pas de AWS_SECRET_ARN, fallback POSTGRES_PASSWORD")

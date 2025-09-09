@@ -1,7 +1,8 @@
 import uuid
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException
+import httpx
+from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from sqlmodel import col, delete, func, select
 
 from app import crud
@@ -13,6 +14,7 @@ from app.api.deps import (
 from app.core.config import settings
 from app.core.security import get_password_hash, verify_password
 from app.models import (
+    AvatarResponse,
     Item,
     Message,
     UpdatePassword,
@@ -224,3 +226,135 @@ def delete_user(
     session.delete(user)
     session.commit()
     return Message(message="User deleted successfully")
+
+
+# Avatar Management Routes
+
+@router.post("/me/avatar", response_model=AvatarResponse)
+def upload_avatar(
+    *,
+    session: SessionDep,
+    current_user: CurrentUser,
+    file: UploadFile = File(...)
+) -> Any:
+    """
+    Upload user avatar.
+    """
+    # Validate file type
+    if file.content_type not in settings.ALLOWED_AVATAR_TYPES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"File type not allowed. Allowed types: {', '.join(settings.ALLOWED_AVATAR_TYPES)}"
+        )
+
+    # Validate file size
+    file_content = file.file.read()
+    if len(file_content) > settings.MAX_AVATAR_SIZE:
+        raise HTTPException(
+            status_code=400,
+            detail=f"File too large. Maximum size: {settings.MAX_AVATAR_SIZE // (1024 * 1024)}MB"
+        )
+
+    # Reset file pointer
+    file.file.seek(0)
+
+    try:
+        # Upload to file service
+        with httpx.Client() as client:
+            files = {"file": (file.filename, file.file, file.content_type)}
+            data = {"folder": "avatars"}
+
+            response = client.post(
+                f"{settings.FILE_SERVICE_URL}/upload",
+                files=files,
+                data=data,
+                timeout=30.0
+            )
+            response.raise_for_status()
+
+            upload_result = response.json()
+            cloudfront_url = upload_result.get("cloudfront_url")
+            file_id = upload_result.get("file_id")
+
+            if not cloudfront_url or not file_id:
+                raise HTTPException(
+                    status_code=500,
+                    detail="Invalid response from file service"
+                )
+
+            # Update user avatar URL in database
+            current_user.avatar_url = cloudfront_url
+            session.add(current_user)
+            session.commit()
+            session.refresh(current_user)
+
+            return AvatarResponse(
+                avatar_url=cloudfront_url,
+                message="Avatar uploaded successfully"
+            )
+
+    except httpx.HTTPStatusError as e:
+        raise HTTPException(
+            status_code=e.response.status_code,
+            detail=f"File service error: {e.response.text}"
+        )
+    except httpx.RequestError as e:
+        raise HTTPException(
+            status_code=503,
+            detail=f"Unable to connect to file service: {str(e)}"
+        )
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Avatar upload failed: {str(e)}"
+        )
+
+
+@router.get("/me/avatar", response_model=AvatarResponse)
+def get_avatar(current_user: CurrentUser) -> Any:
+    """
+    Get current user's avatar URL.
+    """
+    if not current_user.avatar_url:
+        raise HTTPException(
+            status_code=404,
+            detail="No avatar found for this user"
+        )
+
+    return AvatarResponse(
+        avatar_url=current_user.avatar_url,
+        message="Avatar retrieved successfully"
+    )
+
+
+@router.delete("/me/avatar", response_model=Message)
+def delete_avatar(
+    *,
+    session: SessionDep,
+    current_user: CurrentUser
+) -> Any:
+    """
+    Delete user's avatar.
+    """
+    if not current_user.avatar_url:
+        raise HTTPException(
+            status_code=404,
+            detail="No avatar found for this user"
+        )
+
+    # Extract file_id from CloudFront URL (assuming it contains the file_id)
+    # This is a simplified approach - you might need to adjust based on your URL structure
+    try:
+        # For now, we'll just clear the avatar_url from the database
+        # In a real implementation, you'd extract the file_id and call the delete endpoint
+        current_user.avatar_url = None
+        session.add(current_user)
+        session.commit()
+
+        return Message(message="Avatar deleted successfully")
+
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Avatar deletion failed: {str(e)}"
+        )
