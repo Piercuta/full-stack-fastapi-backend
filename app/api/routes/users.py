@@ -342,17 +342,38 @@ def delete_avatar(
             detail="No avatar found for this user"
         )
 
-    # Extract file_id from CloudFront URL (assuming it contains the file_id)
-    # This is a simplified approach - you might need to adjust based on your URL structure
     try:
-        # For now, we'll just clear the avatar_url from the database
-        # In a real implementation, you'd extract the file_id and call the delete endpoint
+        # Extraire le file_id de l'URL CloudFront
+        # Format: https://d1n4zytf7ed6nm.cloudfront.net/files/{file_id}
+        url_parts = current_user.avatar_url.split('/')
+        file_id = url_parts[-1]  # Dernière partie de l'URL
+
+        # Appeler l'API de file-service pour supprimer le fichier
+        with httpx.Client() as client:
+            response = client.delete(
+                f"{settings.FILE_SERVICE_URL}/files/{file_id}",
+                timeout=30.0
+            )
+            response.raise_for_status()
+
+        # Mettre à jour la base de données
         current_user.avatar_url = None
         session.add(current_user)
         session.commit()
 
         return Message(message="Avatar deleted successfully")
 
+    except httpx.HTTPStatusError as e:
+        # Si le fichier n'existe plus sur S3, on continue quand même
+        if e.response.status_code == 404:
+            current_user.avatar_url = None
+            session.add(current_user)
+            session.commit()
+            return Message(message="Avatar deleted successfully (file was already removed)")
+        raise HTTPException(
+            status_code=e.response.status_code,
+            detail=f"File service error: {e.response.text}"
+        )
     except Exception as e:
         raise HTTPException(
             status_code=500,
