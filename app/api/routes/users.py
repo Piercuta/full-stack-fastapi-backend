@@ -126,12 +126,6 @@ def read_user_me(current_user: CurrentUser) -> Any:
     """
     return current_user
 
-@router.get("/me_bis", response_model=UserPublic)
-def read_user_me_bis(current_user: CurrentUser) -> Any:
-    """
-    Get current user.
-    """
-    return current_user
 
 @router.delete("/me", response_model=Message)
 def delete_user_me(session: SessionDep, current_user: CurrentUser) -> Any:
