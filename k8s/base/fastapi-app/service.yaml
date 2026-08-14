@@ -1,0 +1,19 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: fastapi-app
+  labels:
+    app.kubernetes.io/name: fastapi-app
+    app.kubernetes.io/component: api
+  annotations:
+    # ALB target group health check (EKS Auto Mode reads this from the Service)
+    alb.ingress.kubernetes.io/healthcheck-path: /api/v1/utils/health-check/
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: fastapi-app
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+      protocol: TCP

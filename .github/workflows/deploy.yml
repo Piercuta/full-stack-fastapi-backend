@@ -1,0 +1,144 @@
+# Build the FastAPI image, push it to ECR, then apply the matching Kustomize overlay on EKS.
+#
+# Required GitHub Environments: `dev` (branch `dev`) and `prod` (branch `master`).
+#
+# Secrets:
+#   AWS_ACCESS_KEY_ID
+#   AWS_SECRET_ACCESS_KEY
+#   K8S_SECRETS_ENV          contents of secrets.env (POSTGRES_PASSWORD, FIRST_SUPERUSER_PASSWORD, SECRET_KEY)
+#
+# Vars (optional):
+#   AWS_REGION               defaults to eu-west-1
+#
+# The IAM principal must be able to: read Terraform state, push to ECR, and
+# call the EKS API (EKS access entry on the cluster).
+
+name: Build and deploy to EKS
+
+on:
+  push:
+    branches:
+      - master
+      - dev
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: write
+
+concurrency:
+  group: deploy-eks-${{ github.ref_name }}
+  cancel-in-progress: false
+
+env:
+  TF_STATE_BUCKET: piercuta-terraform-state
+  TF_STATE_REGION: eu-west-1
+  K8S_NAMESPACE: test-k8s
+  ECR_REPOSITORY: services/ecs/fastapi_app
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    if: github.ref_name == 'dev' || github.ref_name == 'master'
+    environment: ${{ fromJSON('{"master":"prod","dev":"dev"}')[github.ref_name] }}
+    env:
+      OVERLAY: ${{ fromJSON('{"master":"prod","dev":"dev"}')[github.ref_name] }}
+      FLOATING_TAG: ${{ fromJSON('{"master":"latest","dev":"dev"}')[github.ref_name] }}
+      TF_STATE_KEY: ${{ fromJSON('{"master":"test-k8s/prod/terraform.tfstate","dev":"test-k8s/dev/terraform.tfstate"}')[github.ref_name] }}
+      FRONTEND_HOST: ${{ fromJSON('{"master":"https://test-k8s.piercuta.com","dev":"https://test-k8s.dev.piercuta.com"}')[github.ref_name] }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ vars.AWS_REGION || 'eu-west-1' }}
+
+      - name: Read Terraform outputs
+        id: tf
+        run: |
+          STATE_JSON=$(aws s3 cp \
+            "s3://${TF_STATE_BUCKET}/${TF_STATE_KEY}" \
+            - \
+            --region "${TF_STATE_REGION}")
+
+          CLUSTER=$(echo "$STATE_JSON" | jq -r '.outputs.eks_cluster_name.value')
+          ECR_URI=$(echo "$STATE_JSON" | jq -r --arg repo "$ECR_REPOSITORY" '.outputs.ecr_repository_urls.value[$repo]')
+          POSTGRES_SERVER=$(echo "$STATE_JSON" | jq -r '.outputs.aurora_cluster_endpoint.value')
+
+          if [ -z "$CLUSTER" ] || [ "$CLUSTER" = "null" ]; then
+            echo "Missing Terraform output: eks_cluster_name" >&2
+            exit 1
+          fi
+          if [ -z "$ECR_URI" ] || [ "$ECR_URI" = "null" ]; then
+            echo "Missing Terraform output: ecr_repository_urls[${ECR_REPOSITORY}]" >&2
+            exit 1
+          fi
+          if [ -z "$POSTGRES_SERVER" ] || [ "$POSTGRES_SERVER" = "null" ]; then
+            echo "Missing Terraform output: aurora_cluster_endpoint" >&2
+            exit 1
+          fi
+
+          echo "cluster=${CLUSTER}" >> "$GITHUB_OUTPUT"
+          echo "ecr_uri=${ECR_URI}" >> "$GITHUB_OUTPUT"
+          echo "postgres_server=${POSTGRES_SERVER}" >> "$GITHUB_OUTPUT"
+          echo "Cluster=${CLUSTER} ECR=${ECR_URI}"
+
+      - name: Login to Amazon ECR
+        id: ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build and push image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: |
+            ${{ steps.tf.outputs.ecr_uri }}:${{ github.sha }}
+            ${{ steps.tf.outputs.ecr_uri }}:${{ env.FLOATING_TAG }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Install kubectl
+        uses: azure/setup-kubectl@v4
+        with:
+          version: v1.32.3
+
+      - name: Install kustomize
+        run: |
+          curl -sL "https://github.com/kubernetes-sigs/kustomize/releases/download/kustomize%2Fv5.6.0/kustomize_v5.6.0_linux_amd64.tar.gz" | tar xz
+          sudo mv kustomize /usr/local/bin/kustomize
+          kustomize version
+
+      - name: Write overlay config and secrets
+        working-directory: k8s/overlays/${{ env.OVERLAY }}
+        env:
+          K8S_SECRETS_ENV: ${{ secrets.K8S_SECRETS_ENV }}
+          POSTGRES_SERVER: ${{ steps.tf.outputs.postgres_server }}
+        run: |
+          if [ -z "$K8S_SECRETS_ENV" ]; then
+            echo "Missing GitHub secret K8S_SECRETS_ENV on environment ${{ env.OVERLAY }}" >&2
+            exit 1
+          fi
+          printf '%s\n' "$K8S_SECRETS_ENV" > secrets.env
+          printf 'POSTGRES_SERVER=%s\nFRONTEND_HOST=%s\n' "$POSTGRES_SERVER" "$FRONTEND_HOST" > generated-config.env
+
+      - name: Set image tag
+        working-directory: k8s/overlays/${{ env.OVERLAY }}
+        run: kustomize edit set image "fastapi-app=${{ steps.tf.outputs.ecr_uri }}:${{ github.sha }}"
+
+      - name: Update kubeconfig
+        run: aws eks update-kubeconfig --name "${{ steps.tf.outputs.cluster }}" --region "${{ vars.AWS_REGION || 'eu-west-1' }}"
+
+      - name: Apply manifests
+        run: kubectl apply -k "k8s/overlays/${OVERLAY}"
+
+      - name: Wait for rollout
+        run: kubectl rollout status "deployment/fastapi-app" -n "${K8S_NAMESPACE}" --timeout=180s
