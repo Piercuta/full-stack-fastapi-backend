@@ -1,5 +1,10 @@
 # Build the FastAPI image, push it to ECR, then apply the matching Kustomize overlay on EKS.
 #
+#   push `dev`              → build + deploy automatically
+#   push `master`           → build only
+#   Run workflow on `master` → build + deploy (manual prod release)
+#   Run workflow on `dev`    → build + deploy
+#
 # Required GitHub Environments: `dev` (branch `dev`) and `prod` (branch `master`).
 #
 # Secrets:
@@ -26,27 +31,27 @@ permissions:
   contents: read
   actions: write
 
-concurrency:
-  group: deploy-eks-${{ github.ref_name }}
-  cancel-in-progress: false
-
 env:
   TF_STATE_BUCKET: piercuta-terraform-state
   TF_STATE_REGION: eu-west-1
   K8S_NAMESPACE: test-k8s
   ECR_REPOSITORY: services/ecs/fastapi_app
+  OVERLAY: ${{ fromJSON('{"master":"prod","dev":"dev"}')[github.ref_name] }}
+  FLOATING_TAG: ${{ fromJSON('{"master":"latest","dev":"dev"}')[github.ref_name] }}
+  TF_STATE_KEY: ${{ fromJSON('{"master":"test-k8s/prod/terraform.tfstate","dev":"test-k8s/dev/terraform.tfstate"}')[github.ref_name] }}
+  FRONTEND_HOST: ${{ fromJSON('{"master":"https://test-k8s.piercuta.com","dev":"https://test-k8s.dev.piercuta.com"}')[github.ref_name] }}
 
 jobs:
-  deploy:
+  build:
+    name: Build
     runs-on: ubuntu-latest
     if: github.ref_name == 'dev' || github.ref_name == 'master'
     environment: ${{ fromJSON('{"master":"prod","dev":"dev"}')[github.ref_name] }}
-    env:
-      OVERLAY: ${{ fromJSON('{"master":"prod","dev":"dev"}')[github.ref_name] }}
-      FLOATING_TAG: ${{ fromJSON('{"master":"latest","dev":"dev"}')[github.ref_name] }}
-      TF_STATE_KEY: ${{ fromJSON('{"master":"test-k8s/prod/terraform.tfstate","dev":"test-k8s/dev/terraform.tfstate"}')[github.ref_name] }}
-      FRONTEND_HOST: ${{ fromJSON('{"master":"https://test-k8s.piercuta.com","dev":"https://test-k8s.dev.piercuta.com"}')[github.ref_name] }}
-
+    outputs:
+      cluster: ${{ steps.tf.outputs.cluster }}
+      ecr_uri: ${{ steps.tf.outputs.ecr_uri }}
+      postgres_server: ${{ steps.tf.outputs.postgres_server }}
+      image_tag: ${{ github.sha }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -89,7 +94,6 @@ jobs:
           echo "Cluster=${CLUSTER} ECR=${ECR_URI}"
 
       - name: Login to Amazon ECR
-        id: ecr
         uses: aws-actions/amazon-ecr-login@v2
 
       - name: Set up Docker Buildx
@@ -106,6 +110,27 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
+  deploy:
+    name: Deploy
+    needs: build
+    runs-on: ubuntu-latest
+    # Auto on dev. On master, only when the workflow is started manually.
+    if: github.ref_name == 'dev' || github.event_name == 'workflow_dispatch'
+    environment: ${{ fromJSON('{"master":"prod","dev":"dev"}')[github.ref_name] }}
+    concurrency:
+      group: deploy-eks-${{ github.ref_name }}
+      cancel-in-progress: false
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ vars.AWS_REGION || 'eu-west-1' }}
+
       - name: Install kubectl
         uses: azure/setup-kubectl@v4
         with:
@@ -121,7 +146,7 @@ jobs:
         working-directory: k8s/overlays/${{ env.OVERLAY }}
         env:
           K8S_SECRETS_ENV: ${{ secrets.K8S_SECRETS_ENV }}
-          POSTGRES_SERVER: ${{ steps.tf.outputs.postgres_server }}
+          POSTGRES_SERVER: ${{ needs.build.outputs.postgres_server }}
         run: |
           if [ -z "$K8S_SECRETS_ENV" ]; then
             echo "Missing GitHub secret K8S_SECRETS_ENV on environment ${{ env.OVERLAY }}" >&2
@@ -132,10 +157,19 @@ jobs:
 
       - name: Set image tag
         working-directory: k8s/overlays/${{ env.OVERLAY }}
-        run: kustomize edit set image "fastapi-app=${{ steps.tf.outputs.ecr_uri }}:${{ github.sha }}"
+        run: kustomize edit set image "fastapi-app=${{ needs.build.outputs.ecr_uri }}:${{ needs.build.outputs.image_tag }}"
 
       - name: Update kubeconfig
-        run: aws eks update-kubeconfig --name "${{ steps.tf.outputs.cluster }}" --region "${{ vars.AWS_REGION || 'eu-west-1' }}"
+        run: aws eks update-kubeconfig --name "${{ needs.build.outputs.cluster }}" --region "${{ vars.AWS_REGION || 'eu-west-1' }}"
+
+      - name: Verify cluster access
+        run: |
+          echo "GitHub Actions IAM identity (this ARN needs an EKS access entry):"
+          aws sts get-caller-identity
+          if ! kubectl get namespace "${K8S_NAMESPACE}"; then
+            echo "EKS rejected these credentials. Add this IAM principal as an access entry on ${{ needs.build.outputs.cluster }} with AmazonEKSClusterAdminPolicy (terraform cluster_admin_principal_arns)." >&2
+            exit 1
+          fi
 
       - name: Apply manifests
         run: kubectl apply -k "k8s/overlays/${OVERLAY}"
