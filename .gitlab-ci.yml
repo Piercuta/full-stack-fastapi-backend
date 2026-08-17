@@ -1,0 +1,171 @@
+# Build the FastAPI image, push it to ECR, then apply the matching
+# Kustomize overlay on EKS.
+#
+#   push `dev`              → build + deploy automatically (environment `dev`)
+#   push `master` / `main`  → build + deploy (manual play button, environment `prod`)
+#   git tag                 → build + deploy (manual play button, environment `prod`)
+#
+# GitLab CI/CD variables:
+#   AWS_ACCESS_KEY_ID      (masked)
+#   AWS_SECRET_ACCESS_KEY  (masked)
+#   K8S_SECRETS_ENV        contents of secrets.env (scope per environment)
+#   AWS_REGION             optional, defaults to eu-west-1
+#
+# The IAM principal must be able to: read Terraform state, push to ECR, and
+# call the EKS API (EKS access entry on the cluster).
+# The GitLab runner must allow Docker-in-Docker (privileged / docker:dind).
+
+workflow:
+  rules:
+    - if: $CI_COMMIT_BRANCH == "dev"
+    - if: $CI_COMMIT_BRANCH == "master"
+    - if: $CI_COMMIT_BRANCH == "main"
+    - if: $CI_COMMIT_TAG
+
+stages:
+  - build
+  - deploy
+
+variables:
+  TF_STATE_BUCKET: piercuta-terraform-state
+  TF_STATE_REGION: eu-west-1
+  AWS_DEFAULT_REGION: $AWS_REGION
+  AWS_REGION: eu-west-1
+  K8S_NAMESPACE: test-k8s
+  ECR_REPOSITORY: services/ecs/fastapi_app
+  DOCKER_TLS_CERTDIR: "/certs"
+
+.dev_vars: &dev_vars
+  TF_STATE_KEY: "test-k8s/dev/terraform.tfstate"
+  DEPLOY_ENV: dev
+  OVERLAY: dev
+  FLOATING_TAG: dev
+  FRONTEND_HOST: "https://test-k8s.dev.piercuta.com"
+
+.prod_vars: &prod_vars
+  TF_STATE_KEY: "test-k8s/prod/terraform.tfstate"
+  DEPLOY_ENV: prod
+  OVERLAY: prod
+  FLOATING_TAG: latest
+  FRONTEND_HOST: "https://test-k8s.piercuta.com"
+
+build:
+  stage: build
+  image: docker:27
+  services:
+    - docker:27-dind
+  environment:
+    name: $DEPLOY_ENV
+  rules:
+    - if: $CI_COMMIT_BRANCH == "dev"
+      variables:
+        <<: *dev_vars
+    - if: $CI_COMMIT_BRANCH == "master" || $CI_COMMIT_BRANCH == "main"
+      variables:
+        <<: *prod_vars
+    - if: $CI_COMMIT_TAG
+      variables:
+        <<: *prod_vars
+  before_script:
+    - apk add --no-cache aws-cli jq
+  script:
+    - |
+      STATE_JSON=$(aws s3 cp \
+        "s3://${TF_STATE_BUCKET}/${TF_STATE_KEY}" \
+        - \
+        --region "${TF_STATE_REGION}")
+
+      CLUSTER=$(echo "$STATE_JSON" | jq -r '.outputs.eks_cluster_name.value')
+      ECR_URI=$(echo "$STATE_JSON" | jq -r --arg repo "$ECR_REPOSITORY" '.outputs.ecr_repository_urls.value[$repo]')
+      POSTGRES_SERVER=$(echo "$STATE_JSON" | jq -r '.outputs.aurora_cluster_endpoint.value')
+
+      if [ -z "$CLUSTER" ] || [ "$CLUSTER" = "null" ]; then
+        echo "Missing Terraform output: eks_cluster_name" >&2
+        exit 1
+      fi
+      if [ -z "$ECR_URI" ] || [ "$ECR_URI" = "null" ]; then
+        echo "Missing Terraform output: ecr_repository_urls[${ECR_REPOSITORY}]" >&2
+        exit 1
+      fi
+      if [ -z "$POSTGRES_SERVER" ] || [ "$POSTGRES_SERVER" = "null" ]; then
+        echo "Missing Terraform output: aurora_cluster_endpoint" >&2
+        exit 1
+      fi
+
+      ECR_REGISTRY=$(echo "$ECR_URI" | cut -d/ -f1)
+      aws ecr get-login-password --region "${AWS_REGION}" \
+        | docker login --username AWS --password-stdin "${ECR_REGISTRY}"
+
+      docker build \
+        -t "${ECR_URI}:${CI_COMMIT_SHA}" \
+        -t "${ECR_URI}:${FLOATING_TAG}" \
+        .
+      docker push "${ECR_URI}:${CI_COMMIT_SHA}"
+      docker push "${ECR_URI}:${FLOATING_TAG}"
+
+      {
+        echo "CLUSTER=${CLUSTER}"
+        echo "ECR_URI=${ECR_URI}"
+        echo "POSTGRES_SERVER=${POSTGRES_SERVER}"
+        echo "IMAGE_TAG=${CI_COMMIT_SHA}"
+      } > build.env
+
+      echo "Cluster=${CLUSTER} ECR=${ECR_URI} tag=${CI_COMMIT_SHA}"
+  artifacts:
+    reports:
+      dotenv: build.env
+    expire_in: 1 day
+
+deploy:
+  stage: deploy
+  image: alpine:3.21
+  needs:
+    - job: build
+      artifacts: true
+  environment:
+    name: $DEPLOY_ENV
+  resource_group: deploy-eks-$DEPLOY_ENV
+  rules:
+    - if: $CI_COMMIT_BRANCH == "dev"
+      variables:
+        <<: *dev_vars
+    - if: $CI_COMMIT_BRANCH == "master" || $CI_COMMIT_BRANCH == "main"
+      when: manual
+      variables:
+        <<: *prod_vars
+    - if: $CI_COMMIT_TAG
+      when: manual
+      variables:
+        <<: *prod_vars
+  before_script:
+    - apk add --no-cache aws-cli jq curl
+    - curl -sLO "https://dl.k8s.io/release/v1.32.3/bin/linux/amd64/kubectl"
+    - chmod +x kubectl && mv kubectl /usr/local/bin/kubectl
+    - curl -sL "https://github.com/kubernetes-sigs/kustomize/releases/download/kustomize%2Fv5.6.0/kustomize_v5.6.0_linux_amd64.tar.gz" | tar xz
+    - mv kustomize /usr/local/bin/kustomize
+    - kubectl version --client
+    - kustomize version
+  script:
+    - |
+      if [ -z "$K8S_SECRETS_ENV" ]; then
+        echo "Missing GitLab CI variable K8S_SECRETS_ENV on environment ${DEPLOY_ENV}" >&2
+        exit 1
+      fi
+      cd "k8s/overlays/${OVERLAY}"
+      if [ -f "$K8S_SECRETS_ENV" ]; then
+        cp "$K8S_SECRETS_ENV" secrets.env
+      else
+        printf '%s\n' "$K8S_SECRETS_ENV" > secrets.env
+      fi
+      printf 'POSTGRES_SERVER=%s\nFRONTEND_HOST=%s\n' "$POSTGRES_SERVER" "$FRONTEND_HOST" > generated-config.env
+      kustomize edit set image "fastapi-app=${ECR_URI}:${IMAGE_TAG}"
+    - aws eks update-kubeconfig --name "${CLUSTER}" --region "${AWS_REGION}"
+    - |
+      echo "GitLab CI IAM identity (this ARN needs an EKS access entry):"
+      aws sts get-caller-identity
+      if ! kubectl get namespace "${K8S_NAMESPACE}"; then
+        echo "EKS rejected these credentials. Add this IAM principal as an access entry on ${CLUSTER} with AmazonEKSClusterAdminPolicy (terraform cluster_admin_principal_arns)." >&2
+        exit 1
+      fi
+    - kubectl apply -k "k8s/overlays/${OVERLAY}"
+    - kubectl rollout status "deployment/fastapi-app" -n "${K8S_NAMESPACE}" --timeout=180s
