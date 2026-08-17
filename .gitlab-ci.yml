@@ -8,7 +8,7 @@
 # GitLab CI/CD variables:
 #   AWS_ACCESS_KEY_ID      (masked)
 #   AWS_SECRET_ACCESS_KEY  (masked)
-#   K8S_SECRETS_ENV        contents of secrets.env (scope per environment)
+#   K8S_SECRETS_ENV        dotenv (KEY=value per line) or JSON object; scope per environment
 #   AWS_REGION             optional, defaults to eu-west-1
 #
 # The IAM principal must be able to: read Terraform state, push to ECR, and
@@ -155,9 +155,15 @@ deploy:
       (
         cd "k8s/overlays/${OVERLAY}"
         if [ -f "$K8S_SECRETS_ENV" ]; then
-          cp "$K8S_SECRETS_ENV" secrets.env
+          CONTENT=$(cat "$K8S_SECRETS_ENV")
         else
-          printf '%s\n' "$K8S_SECRETS_ENV" > secrets.env
+          CONTENT=$K8S_SECRETS_ENV
+        fi
+        # secretGenerator envs: expects KEY=value, not a JSON object.
+        if printf '%s' "$CONTENT" | jq -e 'type == "object"' >/dev/null 2>&1; then
+          printf '%s' "$CONTENT" | jq -r 'to_entries[] | "\(.key)=\(.value)"' > secrets.env
+        else
+          printf '%s\n' "$CONTENT" > secrets.env
         fi
         printf 'POSTGRES_SERVER=%s\nFRONTEND_HOST=%s\n' "$POSTGRES_SERVER" "$FRONTEND_HOST" > generated-config.env
         kustomize edit set image "fastapi-app=${ECR_URI}:${IMAGE_TAG}"
