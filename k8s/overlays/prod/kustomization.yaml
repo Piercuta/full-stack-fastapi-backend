@@ -37,3 +37,4 @@ secretGenerator:
 patches:
   - path: ingress-patch.yaml
   - path: replicas-patch.yaml
+  - path: irsa-patch.yaml

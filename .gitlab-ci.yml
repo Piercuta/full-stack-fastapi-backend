@@ -1,5 +1,6 @@
 # Build the FastAPI image, push it to ECR, then apply the matching
-# Kustomize overlay on EKS.
+# Kustomize overlay on EKS. Infra values come from SSM Parameter Store:
+#   /<project>/<env>/<key>  e.g. /test-k8s/dev/eks_cluster_name
 #
 #   push `dev`              → build + deploy automatically (environment `dev`)
 #   push `master` / `main`  → build + deploy (manual play button, environment `prod`)
@@ -8,46 +9,43 @@
 # GitLab CI/CD variables:
 #   AWS_ACCESS_KEY_ID      (masked)
 #   AWS_SECRET_ACCESS_KEY  (masked)
-#   K8S_SECRETS_ENV        dotenv (KEY=value per line) or JSON object; scope per environment
+#   K8S_SECRETS_ENV        FIRST_SUPERUSER_PASSWORD + SECRET_KEY (dotenv or JSON); scope per environment
 #   AWS_REGION             optional, defaults to eu-west-1
 #
-# The IAM principal must be able to: read Terraform state, push to ECR, and
-# call the EKS API (EKS access entry on the cluster).
+# IAM: ssm:GetParameter on /test-k8s/* , ECR push, EKS API access.
 # The GitLab runner must allow Docker-in-Docker (privileged / docker:dind).
 
 workflow:
   rules:
     - if: $CI_COMMIT_BRANCH == "dev"
-    - if: $CI_COMMIT_BRANCH == "master"
-    - if: $CI_COMMIT_BRANCH == "main"
+      variables:
+        DEPLOY_ENV: dev
+        OVERLAY: dev
+        FLOATING_TAG: dev
+        SSM_PREFIX: /test-k8s/dev
+    - if: $CI_COMMIT_BRANCH == "master" || $CI_COMMIT_BRANCH == "main"
+      variables:
+        DEPLOY_ENV: prod
+        OVERLAY: prod
+        FLOATING_TAG: latest
+        SSM_PREFIX: /test-k8s/prod
     - if: $CI_COMMIT_TAG
+      variables:
+        DEPLOY_ENV: prod
+        OVERLAY: prod
+        FLOATING_TAG: latest
+        SSM_PREFIX: /test-k8s/prod
 
 stages:
   - build
   - deploy
 
 variables:
-  TF_STATE_BUCKET: piercuta-terraform-state
-  TF_STATE_REGION: eu-west-1
+  PROJECT_NAME: test-k8s
   AWS_DEFAULT_REGION: $AWS_REGION
   AWS_REGION: eu-west-1
   K8S_NAMESPACE: test-k8s
-  ECR_REPOSITORY: services/ecs/fastapi_app
   DOCKER_TLS_CERTDIR: "/certs"
-
-.dev_vars: &dev_vars
-  TF_STATE_KEY: "test-k8s/dev/terraform.tfstate"
-  DEPLOY_ENV: dev
-  OVERLAY: dev
-  FLOATING_TAG: dev
-  FRONTEND_HOST: "https://test-k8s.dev.piercuta.com"
-
-.prod_vars: &prod_vars
-  TF_STATE_KEY: "test-k8s/prod/terraform.tfstate"
-  DEPLOY_ENV: prod
-  OVERLAY: prod
-  FLOATING_TAG: latest
-  FRONTEND_HOST: "https://test-k8s.piercuta.com"
 
 build:
   stage: build
@@ -56,41 +54,25 @@ build:
     - docker:27-dind
   environment:
     name: $DEPLOY_ENV
-  rules:
-    - if: $CI_COMMIT_BRANCH == "dev"
-      variables:
-        <<: *dev_vars
-    - if: $CI_COMMIT_BRANCH == "master" || $CI_COMMIT_BRANCH == "main"
-      variables:
-        <<: *prod_vars
-    - if: $CI_COMMIT_TAG
-      variables:
-        <<: *prod_vars
   before_script:
     - apk add --no-cache aws-cli jq
   script:
     - |
-      STATE_JSON=$(aws s3 cp \
-        "s3://${TF_STATE_BUCKET}/${TF_STATE_KEY}" \
-        - \
-        --region "${TF_STATE_REGION}")
+      ssm_get() {
+        val=$(aws ssm get-parameter --name "${SSM_PREFIX}/$1" --query Parameter.Value --output text)
+        if [ -z "$val" ] || [ "$val" = "None" ]; then
+          echo "Missing SSM parameter: ${SSM_PREFIX}/$1" >&2
+          exit 1
+        fi
+        printf '%s' "$val"
+      }
 
-      CLUSTER=$(echo "$STATE_JSON" | jq -r '.outputs.eks_cluster_name.value')
-      ECR_URI=$(echo "$STATE_JSON" | jq -r --arg repo "$ECR_REPOSITORY" '.outputs.ecr_repository_urls.value[$repo]')
-      POSTGRES_SERVER=$(echo "$STATE_JSON" | jq -r '.outputs.aurora_cluster_endpoint.value')
-
-      if [ -z "$CLUSTER" ] || [ "$CLUSTER" = "null" ]; then
-        echo "Missing Terraform output: eks_cluster_name" >&2
-        exit 1
-      fi
-      if [ -z "$ECR_URI" ] || [ "$ECR_URI" = "null" ]; then
-        echo "Missing Terraform output: ecr_repository_urls[${ECR_REPOSITORY}]" >&2
-        exit 1
-      fi
-      if [ -z "$POSTGRES_SERVER" ] || [ "$POSTGRES_SERVER" = "null" ]; then
-        echo "Missing Terraform output: aurora_cluster_endpoint" >&2
-        exit 1
-      fi
+      CLUSTER=$(ssm_get eks_cluster_name)
+      ECR_URI=$(ssm_get ecr_fastapi_app)
+      POSTGRES_SERVER=$(ssm_get aurora_cluster_endpoint)
+      FRONTEND_HOST=$(ssm_get site_url)
+      AWS_SECRET_ARN=$(ssm_get aurora_master_user_secret_arn)
+      IRSA_ROLE_ARN=$(ssm_get api_irsa_role_arn)
 
       ECR_REGISTRY=$(echo "$ECR_URI" | cut -d/ -f1)
       aws ecr get-login-password --region "${AWS_REGION}" \
@@ -107,6 +89,9 @@ build:
         echo "CLUSTER=${CLUSTER}"
         echo "ECR_URI=${ECR_URI}"
         echo "POSTGRES_SERVER=${POSTGRES_SERVER}"
+        echo "FRONTEND_HOST=${FRONTEND_HOST}"
+        echo "AWS_SECRET_ARN=${AWS_SECRET_ARN}"
+        echo "IRSA_ROLE_ARN=${IRSA_ROLE_ARN}"
         echo "IMAGE_TAG=${CI_COMMIT_SHA}"
       } > build.env
 
@@ -127,16 +112,7 @@ deploy:
   resource_group: deploy-eks-$DEPLOY_ENV
   rules:
     - if: $CI_COMMIT_BRANCH == "dev"
-      variables:
-        <<: *dev_vars
-    - if: $CI_COMMIT_BRANCH == "master" || $CI_COMMIT_BRANCH == "main"
-      when: manual
-      variables:
-        <<: *prod_vars
-    - if: $CI_COMMIT_TAG
-      when: manual
-      variables:
-        <<: *prod_vars
+    - when: manual
   before_script:
     - apk add --no-cache aws-cli jq curl
     - curl -sLO "https://dl.k8s.io/release/v1.32.3/bin/linux/amd64/kubectl"
@@ -159,13 +135,21 @@ deploy:
         else
           CONTENT=$K8S_SECRETS_ENV
         fi
-        # secretGenerator envs: expects KEY=value, not a JSON object.
         if printf '%s' "$CONTENT" | jq -e 'type == "object"' >/dev/null 2>&1; then
           printf '%s' "$CONTENT" | jq -r 'to_entries[] | "\(.key)=\(.value)"' > secrets.env
         else
           printf '%s\n' "$CONTENT" > secrets.env
         fi
-        printf 'POSTGRES_SERVER=%s\nFRONTEND_HOST=%s\n' "$POSTGRES_SERVER" "$FRONTEND_HOST" > generated-config.env
+        printf 'POSTGRES_SERVER=%s\nFRONTEND_HOST=%s\nAWS_SECRET_ARN=%s\n' \
+          "$POSTGRES_SERVER" "$FRONTEND_HOST" "$AWS_SECRET_ARN" > generated-config.env
+        printf '%s\n' \
+          'apiVersion: v1' \
+          'kind: ServiceAccount' \
+          'metadata:' \
+          '  name: fastapi-app' \
+          '  annotations:' \
+          "    eks.amazonaws.com/role-arn: ${IRSA_ROLE_ARN}" \
+          > irsa-patch.yaml
         kustomize edit set image "fastapi-app=${ECR_URI}:${IMAGE_TAG}"
       )
     - aws eks update-kubeconfig --name "${CLUSTER}" --region "${AWS_REGION}"
