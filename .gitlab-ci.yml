@@ -151,14 +151,17 @@ deploy:
         echo "Missing GitLab CI variable K8S_SECRETS_ENV on environment ${DEPLOY_ENV}" >&2
         exit 1
       fi
-      cd "k8s/overlays/${OVERLAY}"
-      if [ -f "$K8S_SECRETS_ENV" ]; then
-        cp "$K8S_SECRETS_ENV" secrets.env
-      else
-        printf '%s\n' "$K8S_SECRETS_ENV" > secrets.env
-      fi
-      printf 'POSTGRES_SERVER=%s\nFRONTEND_HOST=%s\n' "$POSTGRES_SERVER" "$FRONTEND_HOST" > generated-config.env
-      kustomize edit set image "fastapi-app=${ECR_URI}:${IMAGE_TAG}"
+      # Subshell so `cd` does not persist for later kubectl apply (GitLab concatenates script steps).
+      (
+        cd "k8s/overlays/${OVERLAY}"
+        if [ -f "$K8S_SECRETS_ENV" ]; then
+          cp "$K8S_SECRETS_ENV" secrets.env
+        else
+          printf '%s\n' "$K8S_SECRETS_ENV" > secrets.env
+        fi
+        printf 'POSTGRES_SERVER=%s\nFRONTEND_HOST=%s\n' "$POSTGRES_SERVER" "$FRONTEND_HOST" > generated-config.env
+        kustomize edit set image "fastapi-app=${ECR_URI}:${IMAGE_TAG}"
+      )
     - aws eks update-kubeconfig --name "${CLUSTER}" --region "${AWS_REGION}"
     - |
       echo "GitLab CI IAM identity (this ARN needs an EKS access entry):"
