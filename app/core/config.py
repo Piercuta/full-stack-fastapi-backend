@@ -62,6 +62,7 @@ class Settings(BaseSettings):
     POSTGRES_DB: str = ""
     AWS_SECRET_ARN: str | None = None
     AWS_REGION: str = "eu-west-1"
+    MEDIA_QUEUE_URL: str | None = None
 
     # File Service Configuration
     FILE_SERVICE_URL: str = "http://file-service-svc.file-service.svc.cluster.local"

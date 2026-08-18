@@ -52,6 +52,7 @@ jobs:
       frontend_host: ${{ steps.ssm.outputs.frontend_host }}
       aws_secret_arn: ${{ steps.ssm.outputs.aws_secret_arn }}
       irsa_role_arn: ${{ steps.ssm.outputs.irsa_role_arn }}
+      media_queue_url: ${{ steps.ssm.outputs.media_queue_url }}
       image_tag: ${{ github.sha }}
     steps:
       - name: Checkout
@@ -82,6 +83,8 @@ jobs:
           FRONTEND_HOST=$(ssm_get site_url)
           AWS_SECRET_ARN=$(ssm_get aurora_master_user_secret_arn)
           IRSA_ROLE_ARN=$(ssm_get api_irsa_role_arn)
+          MEDIA_QUEUE_URL=$(aws ssm get-parameter --name "${SSM_PREFIX}/media_queue_url" --query Parameter.Value --output text 2>/dev/null || true)
+          if [ "$MEDIA_QUEUE_URL" = "None" ]; then MEDIA_QUEUE_URL=; fi
 
           echo "cluster=${CLUSTER}" >> "$GITHUB_OUTPUT"
           echo "ecr_uri=${ECR_URI}" >> "$GITHUB_OUTPUT"
@@ -89,6 +92,7 @@ jobs:
           echo "frontend_host=${FRONTEND_HOST}" >> "$GITHUB_OUTPUT"
           echo "aws_secret_arn=${AWS_SECRET_ARN}" >> "$GITHUB_OUTPUT"
           echo "irsa_role_arn=${IRSA_ROLE_ARN}" >> "$GITHUB_OUTPUT"
+          echo "media_queue_url=${MEDIA_QUEUE_URL}" >> "$GITHUB_OUTPUT"
           echo "Cluster=${CLUSTER} ECR=${ECR_URI}"
 
       - name: Login to Amazon ECR
@@ -147,6 +151,7 @@ jobs:
           FRONTEND_HOST: ${{ needs.build.outputs.frontend_host }}
           AWS_SECRET_ARN: ${{ needs.build.outputs.aws_secret_arn }}
           IRSA_ROLE_ARN: ${{ needs.build.outputs.irsa_role_arn }}
+          MEDIA_QUEUE_URL: ${{ needs.build.outputs.media_queue_url }}
         run: |
           if [ -z "$K8S_SECRETS_ENV" ]; then
             echo "Missing GitHub secret K8S_SECRETS_ENV on environment ${DEPLOY_ENV}" >&2
@@ -162,8 +167,8 @@ jobs:
           else
             printf '%s\n' "$CONTENT" > secrets.env
           fi
-          printf 'POSTGRES_SERVER=%s\nFRONTEND_HOST=%s\nAWS_SECRET_ARN=%s\n' \
-            "$POSTGRES_SERVER" "$FRONTEND_HOST" "$AWS_SECRET_ARN" > generated-config.env
+          printf 'POSTGRES_SERVER=%s\nFRONTEND_HOST=%s\nAWS_SECRET_ARN=%s\nMEDIA_QUEUE_URL=%s\n' \
+            "$POSTGRES_SERVER" "$FRONTEND_HOST" "$AWS_SECRET_ARN" "$MEDIA_QUEUE_URL" > generated-config.env
           printf '%s\n' \
             'apiVersion: v1' \
             'kind: ServiceAccount' \

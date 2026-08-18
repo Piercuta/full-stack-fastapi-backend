@@ -26,7 +26,7 @@ from app.models import (
     UserUpdate,
     UserUpdateMe,
 )
-from app.utils import generate_new_account_email, send_email
+from app.services.media_queue import publish_media_uploaded
 
 router = APIRouter(prefix="/users", tags=["users"])
 
@@ -275,6 +275,7 @@ def upload_avatar(
             upload_result = response.json()
             cloudfront_url = upload_result.get("cloudfront_url")
             file_id = upload_result.get("file_id")
+            s3_key = upload_result.get("s3_key")
 
             if not cloudfront_url or not file_id:
                 raise HTTPException(
@@ -287,6 +288,13 @@ def upload_avatar(
             session.add(current_user)
             session.commit()
             session.refresh(current_user)
+
+            if s3_key:
+                publish_media_uploaded(
+                    s3_key=s3_key,
+                    content_type=file.content_type,
+                    user_id=str(current_user.id),
+                )
 
             return AvatarResponse(
                 avatar_url=cloudfront_url,
