@@ -1,22 +1,20 @@
-# Build the FastAPI image, push it to ECR, then apply the matching Kustomize overlay on EKS.
+# Build the FastAPI image, push it to ECR, then apply the matching
+# Kustomize overlay on EKS. Infra values come from SSM Parameter Store:
+#   /<project>/<env>/<key>  e.g. /test-k8s/dev/eks_cluster_name
 #
-#   push `dev`              → build + deploy automatically
-#   push `master`           → build only
-#   Run workflow on `master` → build + deploy (manual prod release)
-#   Run workflow on `dev`    → build + deploy
-#
-# Required GitHub Environments: `dev` (branch `dev`) and `prod` (branch `master`).
+#   push `dev`              → build + deploy automatically (environment `dev`)
+#   push `master` / `main`  → build only
+#   Run workflow on `master` / `main` / tag → build + deploy (manual prod release)
 #
 # Secrets:
 #   AWS_ACCESS_KEY_ID
 #   AWS_SECRET_ACCESS_KEY
-#   K8S_SECRETS_ENV          contents of secrets.env (POSTGRES_PASSWORD, FIRST_SUPERUSER_PASSWORD, SECRET_KEY)
+#   K8S_SECRETS_ENV          FIRST_SUPERUSER_PASSWORD + SECRET_KEY (dotenv or JSON)
 #
 # Vars (optional):
 #   AWS_REGION               defaults to eu-west-1
 #
-# The IAM principal must be able to: read Terraform state, push to ECR, and
-# call the EKS API (EKS access entry on the cluster).
+# IAM: ssm:GetParameter on /test-k8s/* , ECR push, EKS API access.
 
 name: Build and deploy to EKS
 
@@ -24,7 +22,10 @@ on:
   push:
     branches:
       - master
+      - main
       - dev
+    tags:
+      - "*"
   workflow_dispatch:
 
 permissions:
@@ -32,25 +33,25 @@ permissions:
   actions: write
 
 env:
-  TF_STATE_BUCKET: piercuta-terraform-state
-  TF_STATE_REGION: eu-west-1
+  PROJECT_NAME: test-k8s
   K8S_NAMESPACE: test-k8s
-  ECR_REPOSITORY: services/ecs/fastapi_app
-  OVERLAY: ${{ fromJSON('{"master":"prod","dev":"dev"}')[github.ref_name] }}
-  FLOATING_TAG: ${{ fromJSON('{"master":"latest","dev":"dev"}')[github.ref_name] }}
-  TF_STATE_KEY: ${{ fromJSON('{"master":"test-k8s/prod/terraform.tfstate","dev":"test-k8s/dev/terraform.tfstate"}')[github.ref_name] }}
-  FRONTEND_HOST: ${{ fromJSON('{"master":"https://test-k8s.piercuta.com","dev":"https://test-k8s.dev.piercuta.com"}')[github.ref_name] }}
+  DEPLOY_ENV: ${{ github.ref_name == 'dev' && 'dev' || 'prod' }}
+  SSM_PREFIX: ${{ github.ref_name == 'dev' && '/test-k8s/dev' || '/test-k8s/prod' }}
+  OVERLAY: ${{ github.ref_name == 'dev' && 'dev' || 'prod' }}
+  FLOATING_TAG: ${{ github.ref_name == 'dev' && 'dev' || 'latest' }}
 
 jobs:
   build:
     name: Build
     runs-on: ubuntu-latest
-    if: github.ref_name == 'dev' || github.ref_name == 'master'
-    environment: ${{ fromJSON('{"master":"prod","dev":"dev"}')[github.ref_name] }}
+    environment: ${{ github.ref_name == 'dev' && 'dev' || 'prod' }}
     outputs:
-      cluster: ${{ steps.tf.outputs.cluster }}
-      ecr_uri: ${{ steps.tf.outputs.ecr_uri }}
-      postgres_server: ${{ steps.tf.outputs.postgres_server }}
+      cluster: ${{ steps.ssm.outputs.cluster }}
+      ecr_uri: ${{ steps.ssm.outputs.ecr_uri }}
+      postgres_server: ${{ steps.ssm.outputs.postgres_server }}
+      frontend_host: ${{ steps.ssm.outputs.frontend_host }}
+      aws_secret_arn: ${{ steps.ssm.outputs.aws_secret_arn }}
+      irsa_role_arn: ${{ steps.ssm.outputs.irsa_role_arn }}
       image_tag: ${{ github.sha }}
     steps:
       - name: Checkout
@@ -63,34 +64,31 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ vars.AWS_REGION || 'eu-west-1' }}
 
-      - name: Read Terraform outputs
-        id: tf
+      - name: Read SSM parameters
+        id: ssm
         run: |
-          STATE_JSON=$(aws s3 cp \
-            "s3://${TF_STATE_BUCKET}/${TF_STATE_KEY}" \
-            - \
-            --region "${TF_STATE_REGION}")
+          ssm_get() {
+            val=$(aws ssm get-parameter --name "${SSM_PREFIX}/$1" --query Parameter.Value --output text)
+            if [ -z "$val" ] || [ "$val" = "None" ]; then
+              echo "Missing SSM parameter: ${SSM_PREFIX}/$1" >&2
+              exit 1
+            fi
+            printf '%s' "$val"
+          }
 
-          CLUSTER=$(echo "$STATE_JSON" | jq -r '.outputs.eks_cluster_name.value')
-          ECR_URI=$(echo "$STATE_JSON" | jq -r --arg repo "$ECR_REPOSITORY" '.outputs.ecr_repository_urls.value[$repo]')
-          POSTGRES_SERVER=$(echo "$STATE_JSON" | jq -r '.outputs.aurora_cluster_endpoint.value')
-
-          if [ -z "$CLUSTER" ] || [ "$CLUSTER" = "null" ]; then
-            echo "Missing Terraform output: eks_cluster_name" >&2
-            exit 1
-          fi
-          if [ -z "$ECR_URI" ] || [ "$ECR_URI" = "null" ]; then
-            echo "Missing Terraform output: ecr_repository_urls[${ECR_REPOSITORY}]" >&2
-            exit 1
-          fi
-          if [ -z "$POSTGRES_SERVER" ] || [ "$POSTGRES_SERVER" = "null" ]; then
-            echo "Missing Terraform output: aurora_cluster_endpoint" >&2
-            exit 1
-          fi
+          CLUSTER=$(ssm_get eks_cluster_name)
+          ECR_URI=$(ssm_get ecr_fastapi_app)
+          POSTGRES_SERVER=$(ssm_get aurora_cluster_endpoint)
+          FRONTEND_HOST=$(ssm_get site_url)
+          AWS_SECRET_ARN=$(ssm_get aurora_master_user_secret_arn)
+          IRSA_ROLE_ARN=$(ssm_get api_irsa_role_arn)
 
           echo "cluster=${CLUSTER}" >> "$GITHUB_OUTPUT"
           echo "ecr_uri=${ECR_URI}" >> "$GITHUB_OUTPUT"
           echo "postgres_server=${POSTGRES_SERVER}" >> "$GITHUB_OUTPUT"
+          echo "frontend_host=${FRONTEND_HOST}" >> "$GITHUB_OUTPUT"
+          echo "aws_secret_arn=${AWS_SECRET_ARN}" >> "$GITHUB_OUTPUT"
+          echo "irsa_role_arn=${IRSA_ROLE_ARN}" >> "$GITHUB_OUTPUT"
           echo "Cluster=${CLUSTER} ECR=${ECR_URI}"
 
       - name: Login to Amazon ECR
@@ -105,8 +103,8 @@ jobs:
           context: .
           push: true
           tags: |
-            ${{ steps.tf.outputs.ecr_uri }}:${{ github.sha }}
-            ${{ steps.tf.outputs.ecr_uri }}:${{ env.FLOATING_TAG }}
+            ${{ steps.ssm.outputs.ecr_uri }}:${{ github.sha }}
+            ${{ steps.ssm.outputs.ecr_uri }}:${{ env.FLOATING_TAG }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
@@ -114,11 +112,10 @@ jobs:
     name: Deploy
     needs: build
     runs-on: ubuntu-latest
-    # Auto on dev. On master, only when the workflow is started manually.
     if: github.ref_name == 'dev' || github.event_name == 'workflow_dispatch'
-    environment: ${{ fromJSON('{"master":"prod","dev":"dev"}')[github.ref_name] }}
+    environment: ${{ github.ref_name == 'dev' && 'dev' || 'prod' }}
     concurrency:
-      group: deploy-eks-${{ github.ref_name }}
+      group: deploy-eks-${{ github.ref_name == 'dev' && 'dev' || 'prod' }}
       cancel-in-progress: false
     steps:
       - name: Checkout
@@ -142,18 +139,39 @@ jobs:
           sudo mv kustomize /usr/local/bin/kustomize
           kustomize version
 
-      - name: Write overlay config and secrets
+      - name: Write overlay config, secrets and IRSA role
         working-directory: k8s/overlays/${{ env.OVERLAY }}
         env:
           K8S_SECRETS_ENV: ${{ secrets.K8S_SECRETS_ENV }}
           POSTGRES_SERVER: ${{ needs.build.outputs.postgres_server }}
+          FRONTEND_HOST: ${{ needs.build.outputs.frontend_host }}
+          AWS_SECRET_ARN: ${{ needs.build.outputs.aws_secret_arn }}
+          IRSA_ROLE_ARN: ${{ needs.build.outputs.irsa_role_arn }}
         run: |
           if [ -z "$K8S_SECRETS_ENV" ]; then
-            echo "Missing GitHub secret K8S_SECRETS_ENV on environment ${{ env.OVERLAY }}" >&2
+            echo "Missing GitHub secret K8S_SECRETS_ENV on environment ${DEPLOY_ENV}" >&2
             exit 1
           fi
-          printf '%s\n' "$K8S_SECRETS_ENV" > secrets.env
-          printf 'POSTGRES_SERVER=%s\nFRONTEND_HOST=%s\n' "$POSTGRES_SERVER" "$FRONTEND_HOST" > generated-config.env
+          if [ -f "$K8S_SECRETS_ENV" ]; then
+            CONTENT=$(cat "$K8S_SECRETS_ENV")
+          else
+            CONTENT=$K8S_SECRETS_ENV
+          fi
+          if printf '%s' "$CONTENT" | jq -e 'type == "object"' >/dev/null 2>&1; then
+            printf '%s' "$CONTENT" | jq -r 'to_entries[] | "\(.key)=\(.value)"' > secrets.env
+          else
+            printf '%s\n' "$CONTENT" > secrets.env
+          fi
+          printf 'POSTGRES_SERVER=%s\nFRONTEND_HOST=%s\nAWS_SECRET_ARN=%s\n' \
+            "$POSTGRES_SERVER" "$FRONTEND_HOST" "$AWS_SECRET_ARN" > generated-config.env
+          printf '%s\n' \
+            'apiVersion: v1' \
+            'kind: ServiceAccount' \
+            'metadata:' \
+            '  name: fastapi-app' \
+            '  annotations:' \
+            "    eks.amazonaws.com/role-arn: ${IRSA_ROLE_ARN}" \
+            > irsa-patch.yaml
 
       - name: Set image tag
         working-directory: k8s/overlays/${{ env.OVERLAY }}
