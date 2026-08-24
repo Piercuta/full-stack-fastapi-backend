@@ -1,5 +1,5 @@
-# Build the FastAPI image, push it to ECR, then apply the matching
-# Kustomize overlay on EKS. Infra values come from SSM Parameter Store:
+# Build the FastAPI image, push it to ECR, then deploy to EKS with
+# Kustomize (default) or Helm. Infra values come from SSM Parameter Store:
 #   /<project>/<env>/<key>  e.g. /test-k8s/dev/eks_cluster_name
 #
 #   push `dev`              → build + deploy automatically (environment `dev`)
@@ -7,12 +7,12 @@
 #   Run workflow on `master` / `main` / tag → build + deploy (manual prod release)
 #
 # Secrets:
-#   AWS_ACCESS_KEY_ID
-#   AWS_SECRET_ACCESS_KEY
 #   K8S_SECRETS_ENV          FIRST_SUPERUSER_PASSWORD + SECRET_KEY (dotenv or JSON)
 #
-# Vars (optional):
+# Vars:
+#   AWS_ROLE_ARN
 #   AWS_REGION               defaults to eu-west-1
+#   DEPLOY_TOOL             kustomize (default) | helm
 #
 # IAM: ssm:GetParameter on /test-k8s/* , ECR push, EKS API access.
 
@@ -40,6 +40,7 @@ env:
   SSM_PREFIX: ${{ github.ref_name == 'dev' && '/test-k8s/dev' || '/test-k8s/prod' }}
   OVERLAY: ${{ github.ref_name == 'dev' && 'dev' || 'prod' }}
   FLOATING_TAG: ${{ github.ref_name == 'dev' && 'dev' || 'latest' }}
+  DEPLOY_TOOL: ${{ vars.DEPLOY_TOOL || 'kustomize' }}
 
 jobs:
   build:
@@ -63,7 +64,7 @@ jobs:
         uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: ${{ vars.AWS_ROLE_ARN }}
-          aws-region: ${{ vars.AWS_REGION  }}
+          aws-region: ${{ vars.AWS_REGION || 'eu-west-1' }}
 
       - name: Read SSM parameters
         id: ssm
@@ -129,7 +130,7 @@ jobs:
         uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: ${{ vars.AWS_ROLE_ARN }}
-          aws-region: ${{ vars.AWS_REGION  }}
+          aws-region: ${{ vars.AWS_REGION || 'eu-west-1' }}
 
       - name: Install kubectl
         uses: azure/setup-kubectl@v4
@@ -137,20 +138,22 @@ jobs:
           version: v1.32.3
 
       - name: Install kustomize
+        if: env.DEPLOY_TOOL == 'kustomize'
         run: |
           curl -sL "https://github.com/kubernetes-sigs/kustomize/releases/download/kustomize%2Fv5.6.0/kustomize_v5.6.0_linux_amd64.tar.gz" | tar xz
           sudo mv kustomize /usr/local/bin/kustomize
           kustomize version
 
-      - name: Write overlay config, secrets and IRSA role
-        working-directory: k8s/overlays/${{ env.OVERLAY }}
+      - name: Install Helm
+        if: env.DEPLOY_TOOL == 'helm'
+        uses: azure/setup-helm@v4
+        with:
+          version: v3.16.4
+
+      - name: Prepare secrets file
+        id: secrets
         env:
           K8S_SECRETS_ENV: ${{ secrets.K8S_SECRETS_ENV }}
-          POSTGRES_SERVER: ${{ needs.build.outputs.postgres_server }}
-          FRONTEND_HOST: ${{ needs.build.outputs.frontend_host }}
-          AWS_SECRET_ARN: ${{ needs.build.outputs.aws_secret_arn }}
-          IRSA_ROLE_ARN: ${{ needs.build.outputs.irsa_role_arn }}
-          MEDIA_QUEUE_URL: ${{ needs.build.outputs.media_queue_url }}
         run: |
           if [ -z "$K8S_SECRETS_ENV" ]; then
             echo "Missing GitHub secret K8S_SECRETS_ENV on environment ${DEPLOY_ENV}" >&2
@@ -162,24 +165,10 @@ jobs:
             CONTENT=$K8S_SECRETS_ENV
           fi
           if printf '%s' "$CONTENT" | jq -e 'type == "object"' >/dev/null 2>&1; then
-            printf '%s' "$CONTENT" | jq -r 'to_entries[] | "\(.key)=\(.value)"' > secrets.env
+            printf '%s' "$CONTENT" | jq -r 'to_entries[] | "\(.key)=\(.value)"' > /tmp/secrets.env
           else
-            printf '%s\n' "$CONTENT" > secrets.env
+            printf '%s\n' "$CONTENT" > /tmp/secrets.env
           fi
-          printf 'POSTGRES_SERVER=%s\nFRONTEND_HOST=%s\nAWS_SECRET_ARN=%s\nMEDIA_QUEUE_URL=%s\n' \
-            "$POSTGRES_SERVER" "$FRONTEND_HOST" "$AWS_SECRET_ARN" "$MEDIA_QUEUE_URL" > generated-config.env
-          printf '%s\n' \
-            'apiVersion: v1' \
-            'kind: ServiceAccount' \
-            'metadata:' \
-            '  name: fastapi-app' \
-            '  annotations:' \
-            "    eks.amazonaws.com/role-arn: ${IRSA_ROLE_ARN}" \
-            > irsa-patch.yaml
-
-      - name: Set image tag
-        working-directory: k8s/overlays/${{ env.OVERLAY }}
-        run: kustomize edit set image "fastapi-app=${{ needs.build.outputs.ecr_uri }}:${{ needs.build.outputs.image_tag }}"
 
       - name: Update kubeconfig
         run: aws eks update-kubeconfig --name "${{ needs.build.outputs.cluster }}" --region "${{ vars.AWS_REGION || 'eu-west-1' }}"
@@ -193,8 +182,80 @@ jobs:
             exit 1
           fi
 
-      - name: Apply manifests
-        run: kubectl apply -k "k8s/overlays/${OVERLAY}"
+      - name: Deploy with Kustomize
+        if: env.DEPLOY_TOOL == 'kustomize'
+        env:
+          POSTGRES_SERVER: ${{ needs.build.outputs.postgres_server }}
+          FRONTEND_HOST: ${{ needs.build.outputs.frontend_host }}
+          AWS_SECRET_ARN: ${{ needs.build.outputs.aws_secret_arn }}
+          IRSA_ROLE_ARN: ${{ needs.build.outputs.irsa_role_arn }}
+          MEDIA_QUEUE_URL: ${{ needs.build.outputs.media_queue_url }}
+          ECR_URI: ${{ needs.build.outputs.ecr_uri }}
+          IMAGE_TAG: ${{ needs.build.outputs.image_tag }}
+        run: |
+          (
+            cd "k8s/overlays/${OVERLAY}"
+            cp /tmp/secrets.env secrets.env
+            printf 'POSTGRES_SERVER=%s\nFRONTEND_HOST=%s\nAWS_SECRET_ARN=%s\nMEDIA_QUEUE_URL=%s\n' \
+              "$POSTGRES_SERVER" "$FRONTEND_HOST" "$AWS_SECRET_ARN" "$MEDIA_QUEUE_URL" > generated-config.env
+            printf '%s\n' \
+              'apiVersion: v1' \
+              'kind: ServiceAccount' \
+              'metadata:' \
+              '  name: fastapi-app' \
+              '  annotations:' \
+              "    eks.amazonaws.com/role-arn: ${IRSA_ROLE_ARN}" \
+              > irsa-patch.yaml
+            kustomize edit set image "fastapi-app=${ECR_URI}:${IMAGE_TAG}"
+          )
+          kubectl apply -k "k8s/overlays/${OVERLAY}"
+          kubectl rollout status "deployment/fastapi-app" -n "${K8S_NAMESPACE}" --timeout=180s
 
-      - name: Wait for rollout
-        run: kubectl rollout status "deployment/fastapi-app" -n "${K8S_NAMESPACE}" --timeout=180s
+      - name: Deploy with Helm
+        if: env.DEPLOY_TOOL == 'helm'
+        env:
+          POSTGRES_SERVER: ${{ needs.build.outputs.postgres_server }}
+          FRONTEND_HOST: ${{ needs.build.outputs.frontend_host }}
+          AWS_SECRET_ARN: ${{ needs.build.outputs.aws_secret_arn }}
+          IRSA_ROLE_ARN: ${{ needs.build.outputs.irsa_role_arn }}
+          MEDIA_QUEUE_URL: ${{ needs.build.outputs.media_queue_url }}
+          ECR_URI: ${{ needs.build.outputs.ecr_uri }}
+          IMAGE_TAG: ${{ needs.build.outputs.image_tag }}
+        run: |
+          REPLICAS=1
+          INGRESS_HOST="api-test-k8s.dev.piercuta.com"
+          if [ "${DEPLOY_ENV}" != "dev" ]; then
+            REPLICAS=2
+            INGRESS_HOST="api.test-k8s.piercuta.com"
+          fi
+
+          {
+            printf '%s\n' \
+              "replicaCount: ${REPLICAS}" \
+              "image:" \
+              "  repository: ${ECR_URI}" \
+              "  tag: \"${IMAGE_TAG}\"" \
+              "serviceAccount:" \
+              "  annotations:" \
+              "    eks.amazonaws.com/role-arn: \"${IRSA_ROLE_ARN}\"" \
+              "ingress:" \
+              "  host: \"${INGRESS_HOST}\"" \
+              "config:" \
+              "  ENVIRONMENT: \"${DEPLOY_ENV}\"" \
+              "  POSTGRES_SERVER: \"${POSTGRES_SERVER}\"" \
+              "  FRONTEND_HOST: \"${FRONTEND_HOST}\"" \
+              "  AWS_SECRET_ARN: \"${AWS_SECRET_ARN}\"" \
+              "  MEDIA_QUEUE_URL: \"${MEDIA_QUEUE_URL}\"" \
+              "secrets:"
+            while IFS= read -r line || [ -n "$line" ]; do
+              case "$line" in ''|\#*) continue ;; esac
+              key="${line%%=*}"
+              val="${line#*=}"
+              printf '  %s: %s\n' "$key" "$(printf '%s' "$val" | jq -Rs .)"
+            done < /tmp/secrets.env
+          } > /tmp/helm-ci-values.yaml
+
+          helm upgrade --install fastapi-app ./charts/fastapi-app \
+            -n "${K8S_NAMESPACE}" \
+            -f /tmp/helm-ci-values.yaml \
+            --wait --timeout 180s

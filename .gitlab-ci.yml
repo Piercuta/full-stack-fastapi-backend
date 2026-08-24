@@ -1,5 +1,5 @@
-# Build the FastAPI image, push it to ECR, then apply the matching
-# Kustomize overlay on EKS. Infra values come from SSM Parameter Store:
+# Build the FastAPI image, push it to ECR, then deploy to EKS with
+# Kustomize (default) or Helm. Infra values come from SSM Parameter Store:
 #   /<project>/<env>/<key>  e.g. /test-k8s/dev/eks_cluster_name
 #
 #   push `dev`              → build + deploy automatically (environment `dev`)
@@ -11,6 +11,7 @@
 #   AWS_SECRET_ACCESS_KEY  (masked)
 #   K8S_SECRETS_ENV        FIRST_SUPERUSER_PASSWORD + SECRET_KEY (dotenv or JSON); scope per environment
 #   AWS_REGION             optional, defaults to eu-west-1
+#   DEPLOY_TOOL            kustomize (default) | helm
 #
 # IAM: ssm:GetParameter on /test-k8s/* , ECR push, EKS API access.
 # The GitLab runner must allow Docker-in-Docker (privileged / docker:dind).
@@ -45,6 +46,7 @@ variables:
   AWS_DEFAULT_REGION: $AWS_REGION
   AWS_REGION: eu-west-1
   K8S_NAMESPACE: test-k8s
+  DEPLOY_TOOL: kustomize
   DOCKER_TLS_CERTDIR: "/certs"
 
 build:
@@ -120,41 +122,33 @@ deploy:
     - apk add --no-cache aws-cli jq curl
     - curl -sLO "https://dl.k8s.io/release/v1.32.3/bin/linux/amd64/kubectl"
     - chmod +x kubectl && mv kubectl /usr/local/bin/kubectl
-    - curl -sL "https://github.com/kubernetes-sigs/kustomize/releases/download/kustomize%2Fv5.6.0/kustomize_v5.6.0_linux_amd64.tar.gz" | tar xz
-    - mv kustomize /usr/local/bin/kustomize
     - kubectl version --client
-    - kustomize version
+    - |
+      if [ "${DEPLOY_TOOL}" = "helm" ]; then
+        curl -sL "https://get.helm.sh/helm-v3.16.4-linux-amd64.tar.gz" | tar xz
+        mv linux-amd64/helm /usr/local/bin/helm
+        helm version
+      else
+        curl -sL "https://github.com/kubernetes-sigs/kustomize/releases/download/kustomize%2Fv5.6.0/kustomize_v5.6.0_linux_amd64.tar.gz" | tar xz
+        mv kustomize /usr/local/bin/kustomize
+        kustomize version
+      fi
   script:
     - |
       if [ -z "$K8S_SECRETS_ENV" ]; then
         echo "Missing GitLab CI variable K8S_SECRETS_ENV on environment ${DEPLOY_ENV}" >&2
         exit 1
       fi
-      # Subshell so `cd` does not persist for later kubectl apply (GitLab concatenates script steps).
-      (
-        cd "k8s/overlays/${OVERLAY}"
-        if [ -f "$K8S_SECRETS_ENV" ]; then
-          CONTENT=$(cat "$K8S_SECRETS_ENV")
-        else
-          CONTENT=$K8S_SECRETS_ENV
-        fi
-        if printf '%s' "$CONTENT" | jq -e 'type == "object"' >/dev/null 2>&1; then
-          printf '%s' "$CONTENT" | jq -r 'to_entries[] | "\(.key)=\(.value)"' > secrets.env
-        else
-          printf '%s\n' "$CONTENT" > secrets.env
-        fi
-        printf 'POSTGRES_SERVER=%s\nFRONTEND_HOST=%s\nAWS_SECRET_ARN=%s\nMEDIA_QUEUE_URL=%s\n' \
-          "$POSTGRES_SERVER" "$FRONTEND_HOST" "$AWS_SECRET_ARN" "$MEDIA_QUEUE_URL" > generated-config.env
-        printf '%s\n' \
-          'apiVersion: v1' \
-          'kind: ServiceAccount' \
-          'metadata:' \
-          '  name: fastapi-app' \
-          '  annotations:' \
-          "    eks.amazonaws.com/role-arn: ${IRSA_ROLE_ARN}" \
-          > irsa-patch.yaml
-        kustomize edit set image "fastapi-app=${ECR_URI}:${IMAGE_TAG}"
-      )
+      if [ -f "$K8S_SECRETS_ENV" ]; then
+        CONTENT=$(cat "$K8S_SECRETS_ENV")
+      else
+        CONTENT=$K8S_SECRETS_ENV
+      fi
+      if printf '%s' "$CONTENT" | jq -e 'type == "object"' >/dev/null 2>&1; then
+        printf '%s' "$CONTENT" | jq -r 'to_entries[] | "\(.key)=\(.value)"' > /tmp/secrets.env
+      else
+        printf '%s\n' "$CONTENT" > /tmp/secrets.env
+      fi
     - aws eks update-kubeconfig --name "${CLUSTER}" --region "${AWS_REGION}"
     - |
       echo "GitLab CI IAM identity (this ARN needs an EKS access entry):"
@@ -163,5 +157,59 @@ deploy:
         echo "EKS rejected these credentials. Add this IAM principal as an access entry on ${CLUSTER} with AmazonEKSClusterAdminPolicy (terraform cluster_admin_principal_arns)." >&2
         exit 1
       fi
-    - kubectl apply -k "k8s/overlays/${OVERLAY}"
-    - kubectl rollout status "deployment/fastapi-app" -n "${K8S_NAMESPACE}" --timeout=180s
+    - |
+      if [ "${DEPLOY_TOOL}" = "helm" ]; then
+        REPLICAS=1
+        INGRESS_HOST="api-test-k8s.dev.piercuta.com"
+        if [ "${DEPLOY_ENV}" != "dev" ]; then
+          REPLICAS=2
+          INGRESS_HOST="api.test-k8s.piercuta.com"
+        fi
+        {
+          printf '%s\n' \
+            "replicaCount: ${REPLICAS}" \
+            "image:" \
+            "  repository: ${ECR_URI}" \
+            "  tag: \"${IMAGE_TAG}\"" \
+            "serviceAccount:" \
+            "  annotations:" \
+            "    eks.amazonaws.com/role-arn: \"${IRSA_ROLE_ARN}\"" \
+            "ingress:" \
+            "  host: \"${INGRESS_HOST}\"" \
+            "config:" \
+            "  ENVIRONMENT: \"${DEPLOY_ENV}\"" \
+            "  POSTGRES_SERVER: \"${POSTGRES_SERVER}\"" \
+            "  FRONTEND_HOST: \"${FRONTEND_HOST}\"" \
+            "  AWS_SECRET_ARN: \"${AWS_SECRET_ARN}\"" \
+            "  MEDIA_QUEUE_URL: \"${MEDIA_QUEUE_URL}\"" \
+            "secrets:"
+          while IFS= read -r line || [ -n "$line" ]; do
+            case "$line" in ''|\#*) continue ;; esac
+            key="${line%%=*}"
+            val="${line#*=}"
+            printf '  %s: %s\n' "$key" "$(printf '%s' "$val" | jq -Rs .)"
+          done < /tmp/secrets.env
+        } > /tmp/helm-ci-values.yaml
+        helm upgrade --install fastapi-app ./charts/fastapi-app \
+          -n "${K8S_NAMESPACE}" \
+          -f /tmp/helm-ci-values.yaml \
+          --wait --timeout 180s
+      else
+        (
+          cd "k8s/overlays/${OVERLAY}"
+          cp /tmp/secrets.env secrets.env
+          printf 'POSTGRES_SERVER=%s\nFRONTEND_HOST=%s\nAWS_SECRET_ARN=%s\nMEDIA_QUEUE_URL=%s\n' \
+            "$POSTGRES_SERVER" "$FRONTEND_HOST" "$AWS_SECRET_ARN" "$MEDIA_QUEUE_URL" > generated-config.env
+          printf '%s\n' \
+            'apiVersion: v1' \
+            'kind: ServiceAccount' \
+            'metadata:' \
+            '  name: fastapi-app' \
+            '  annotations:' \
+            "    eks.amazonaws.com/role-arn: ${IRSA_ROLE_ARN}" \
+            > irsa-patch.yaml
+          kustomize edit set image "fastapi-app=${ECR_URI}:${IMAGE_TAG}"
+        )
+        kubectl apply -k "k8s/overlays/${OVERLAY}"
+        kubectl rollout status "deployment/fastapi-app" -n "${K8S_NAMESPACE}" --timeout=180s
+      fi

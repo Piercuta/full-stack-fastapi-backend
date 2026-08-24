@@ -1,0 +1,50 @@
+replicaCount: 1
+
+image:
+  repository: fastapi-app
+  tag: latest
+  pullPolicy: IfNotPresent
+
+nameOverride: ""
+fullnameOverride: fastapi-app
+
+serviceAccount:
+  create: true
+  name: fastapi-app
+  annotations: {}
+
+service:
+  type: ClusterIP
+  port: 80
+  annotations:
+    alb.ingress.kubernetes.io/healthcheck-path: /api/v1/utils/health-check/
+
+ingress:
+  enabled: true
+  className: alb
+  host: api.example.com
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 512Mi
+  limits:
+    cpu: 500m
+    memory: 768Mi
+
+config:
+  PROJECT_NAME: test-k8s
+  ENVIRONMENT: dev
+  POSTGRES_PORT: "5432"
+  POSTGRES_USER: postgres
+  POSTGRES_DB: app
+  FILE_SERVICE_URL: http://file-service
+  AWS_REGION: eu-west-1
+  FIRST_SUPERUSER: admin@example.com
+  POSTGRES_SERVER: ""
+  FRONTEND_HOST: ""
+  AWS_SECRET_ARN: ""
+  MEDIA_QUEUE_URL: ""
+
+# Populated by CI from K8S_SECRETS_ENV (FIRST_SUPERUSER_PASSWORD, SECRET_KEY)
+secrets: {}
