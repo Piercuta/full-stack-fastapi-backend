@@ -1,20 +1,24 @@
-# Build the FastAPI image, push it to ECR, then deploy to EKS with
-# Kustomize (default) or Helm. Infra values come from SSM Parameter Store:
-#   /<project>/<env>/<key>  e.g. /test-k8s/dev/eks_cluster_name
+# Build the FastAPI image, push it to ECR, then deploy via:
+#   - gitops (default): bump image.tag in full-stack-git-ops → Argo CD syncs
+#   - kustomize / helm: apply directly to EKS (legacy / fallback)
 #
 #   push `dev`              → build + deploy automatically (environment `dev`)
 #   push `master` / `main`  → build only
 #   Run workflow on `master` / `main` / tag → build + deploy (manual prod release)
 #
 # Secrets:
-#   K8S_SECRETS_ENV          FIRST_SUPERUSER_PASSWORD + SECRET_KEY (dotenv or JSON)
+#   K8S_SECRETS_ENV          required for kustomize/helm only
+#   GITOPS_SSH_PRIVATE_KEY   required for gitops (deploy key / SSH key with write
+#                            access to Piercuta/full-stack-git-ops)
 #
 # Vars:
 #   AWS_ROLE_ARN
 #   AWS_REGION               defaults to eu-west-1
-#   DEPLOY_TOOL             kustomize (default) | helm
+#   DEPLOY_TOOL             gitops (default) | kustomize | helm
+#   GITOPS_REPO             defaults to git@github.com:Piercuta/full-stack-git-ops.git
+#   GITOPS_BRANCH           defaults to current branch name for overlay (dev → dev)
 #
-# IAM: ssm:GetParameter on /test-k8s/* , ECR push, EKS API access.
+# IAM: ssm:GetParameter on /test-k8s/* , ECR push; EKS only if DEPLOY_TOOL != gitops.
 
 name: Build and deploy to EKS
 
@@ -40,7 +44,9 @@ env:
   SSM_PREFIX: ${{ github.ref_name == 'dev' && '/test-k8s/dev' || '/test-k8s/prod' }}
   OVERLAY: ${{ github.ref_name == 'dev' && 'dev' || 'prod' }}
   FLOATING_TAG: ${{ github.ref_name == 'dev' && 'dev' || 'latest' }}
-  DEPLOY_TOOL: ${{ vars.DEPLOY_TOOL || 'kustomize' }}
+  DEPLOY_TOOL: ${{ vars.DEPLOY_TOOL || 'gitops' }}
+  GITOPS_REPO: ${{ vars.GITOPS_REPO || 'git@github.com:Piercuta/full-stack-git-ops.git' }}
+  GITOPS_BRANCH: ${{ vars.GITOPS_BRANCH || (github.ref_name == 'dev' && 'dev' || 'master') }}
 
 jobs:
   build:
@@ -124,15 +130,18 @@ jobs:
       cancel-in-progress: false
     steps:
       - name: Checkout
+        if: env.DEPLOY_TOOL != 'gitops'
         uses: actions/checkout@v4
 
       - name: Configure AWS credentials
+        if: env.DEPLOY_TOOL != 'gitops'
         uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: ${{ vars.AWS_ROLE_ARN }}
           aws-region: ${{ vars.AWS_REGION || 'eu-west-1' }}
 
       - name: Install kubectl
+        if: env.DEPLOY_TOOL != 'gitops'
         uses: azure/setup-kubectl@v4
         with:
           version: v1.32.3
@@ -151,6 +160,7 @@ jobs:
           version: v3.16.4
 
       - name: Prepare secrets file
+        if: env.DEPLOY_TOOL != 'gitops'
         id: secrets
         env:
           K8S_SECRETS_ENV: ${{ secrets.K8S_SECRETS_ENV }}
@@ -171,9 +181,11 @@ jobs:
           fi
 
       - name: Update kubeconfig
+        if: env.DEPLOY_TOOL != 'gitops'
         run: aws eks update-kubeconfig --name "${{ needs.build.outputs.cluster }}" --region "${{ vars.AWS_REGION || 'eu-west-1' }}"
 
       - name: Verify cluster access
+        if: env.DEPLOY_TOOL != 'gitops'
         run: |
           echo "GitHub Actions IAM identity (this ARN needs an EKS access entry):"
           aws sts get-caller-identity
@@ -181,6 +193,65 @@ jobs:
             echo "EKS rejected these credentials. Add this IAM principal as an access entry on ${{ needs.build.outputs.cluster }} with AmazonEKSClusterAdminPolicy (terraform cluster_admin_principal_arns)." >&2
             exit 1
           fi
+
+      - name: Setup GitOps SSH key
+        if: env.DEPLOY_TOOL == 'gitops'
+        uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.GITOPS_SSH_PRIVATE_KEY }}
+
+      - name: Deploy with GitOps (bump image tag)
+        if: env.DEPLOY_TOOL == 'gitops'
+        env:
+          ECR_URI: ${{ needs.build.outputs.ecr_uri }}
+          IMAGE_TAG: ${{ needs.build.outputs.image_tag }}
+        run: |
+          set -euo pipefail
+          if [ -z "${SSH_AUTH_SOCK:-}" ]; then
+            echo "SSH agent not loaded. Set GitHub secret GITOPS_SSH_PRIVATE_KEY (private key with write access to the GitOps repo)." >&2
+            exit 1
+          fi
+
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+          ssh-keyscan -t rsa,ecdsa,ed25519 github.com >> ~/.ssh/known_hosts 2>/dev/null
+
+          VALUES_FILE="apps/fastapi-app/values-${DEPLOY_ENV}.yaml"
+          git clone --depth 1 --branch "${GITOPS_BRANCH}" "${GITOPS_REPO}" gitops-repo
+          cd gitops-repo
+
+          if [ ! -f "$VALUES_FILE" ]; then
+            echo "Missing ${VALUES_FILE} in GitOps repo (branch ${GITOPS_BRANCH})" >&2
+            exit 1
+          fi
+
+          # Update image.repository and image.tag under the image: block
+          awk -v repo="$ECR_URI" -v tag="$IMAGE_TAG" '
+            BEGIN { in_image = 0 }
+            /^image:/ { in_image = 1; print; next }
+            in_image && /^[^ ]/ { in_image = 0 }
+            in_image && /^[[:space:]]+repository:/ {
+              print "  repository: " repo
+              next
+            }
+            in_image && /^[[:space:]]+tag:/ {
+              print "  tag: \"" tag "\""
+              next
+            }
+            { print }
+          ' "$VALUES_FILE" > "${VALUES_FILE}.tmp"
+          mv "${VALUES_FILE}.tmp" "$VALUES_FILE"
+
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git config user.name "github-actions[bot]"
+          git add "$VALUES_FILE"
+          if git diff --staged --quiet; then
+            echo "Image tag already ${IMAGE_TAG}; nothing to commit."
+            exit 0
+          fi
+          git commit -m "chore(fastapi-app): bump image to ${IMAGE_TAG} (${DEPLOY_ENV})"
+          git push origin "HEAD:${GITOPS_BRANCH}"
+          echo "Pushed GitOps update; Argo CD will sync automatically."
 
       - name: Deploy with Kustomize
         if: env.DEPLOY_TOOL == 'kustomize'
