@@ -1,22 +1,25 @@
 # Build the FastAPI image, push it to ECR, then deploy via:
-#   - gitops (default): bump image.tag in full-stack-git-ops → Argo CD syncs
+#   - gitops (default): bump image.tag on GitOps branch main → Argo CD syncs
+#       branch `dev`  → apps/fastapi-app/values-dev.yaml
+#       tag / master  → apps/fastapi-app/values-prod.yaml
 #   - kustomize / helm: apply directly to EKS (legacy / fallback)
 #
 #   push `dev`              → build + deploy automatically (environment `dev`)
 #   push `master` / `main`  → build only
-#   Run workflow on `master` / `main` / tag → build + deploy (manual prod release)
+#   push tag                → build + deploy prod values (gitops)
+#   workflow_dispatch       → build + deploy (prod if not on `dev`)
 #
 # Secrets:
 #   K8S_SECRETS_ENV          required for kustomize/helm only
-#   GITOPS_SSH_PRIVATE_KEY   required for gitops (deploy key / SSH key with write
-#                            access to Piercuta/full-stack-git-ops)
+#   GITOPS_SSH_PRIVATE_KEY   required for gitops (SSH key with write access
+#                            to Piercuta/full-stack-git-ops)
 #
 # Vars:
 #   AWS_ROLE_ARN
 #   AWS_REGION               defaults to eu-west-1
 #   DEPLOY_TOOL             gitops (default) | kustomize | helm
 #   GITOPS_REPO             defaults to git@github.com:Piercuta/full-stack-git-ops.git
-#   GITOPS_BRANCH           defaults to current branch name for overlay (dev → dev)
+#   GITOPS_BRANCH           defaults to main (single-branch GitOps)
 #
 # IAM: ssm:GetParameter on /test-k8s/* , ECR push; EKS only if DEPLOY_TOOL != gitops.
 
@@ -46,7 +49,7 @@ env:
   FLOATING_TAG: ${{ github.ref_name == 'dev' && 'dev' || 'latest' }}
   DEPLOY_TOOL: ${{ vars.DEPLOY_TOOL || 'gitops' }}
   GITOPS_REPO: ${{ vars.GITOPS_REPO || 'git@github.com:Piercuta/full-stack-git-ops.git' }}
-  GITOPS_BRANCH: ${{ vars.GITOPS_BRANCH || (github.ref_name == 'dev' && 'dev' || 'master') }}
+  GITOPS_BRANCH: ${{ vars.GITOPS_BRANCH || 'main' }}
 
 jobs:
   build:
@@ -123,7 +126,10 @@ jobs:
     name: Deploy
     needs: build
     runs-on: ubuntu-latest
-    if: github.ref_name == 'dev' || github.event_name == 'workflow_dispatch'
+    if: >
+      github.ref_name == 'dev' ||
+      startsWith(github.ref, 'refs/tags/') ||
+      github.event_name == 'workflow_dispatch'
     environment: ${{ github.ref_name == 'dev' && 'dev' || 'prod' }}
     concurrency:
       group: deploy-eks-${{ github.ref_name == 'dev' && 'dev' || 'prod' }}

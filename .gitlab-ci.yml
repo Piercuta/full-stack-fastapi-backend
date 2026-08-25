@@ -1,19 +1,24 @@
-# Build the FastAPI image, push it to ECR, then deploy to EKS with
-# Kustomize (default) or Helm. Infra values come from SSM Parameter Store:
-#   /<project>/<env>/<key>  e.g. /test-k8s/dev/eks_cluster_name
+# Build the FastAPI image, push it to ECR, then deploy via:
+#   - gitops (default): bump image.tag on GitOps branch main → Argo CD syncs
+#       branch `dev`           → values-dev.yaml
+#       tag / master (manual)  → values-prod.yaml
+#   - kustomize / helm: apply directly to EKS (legacy / fallback)
 #
 #   push `dev`              → build + deploy automatically (environment `dev`)
 #   push `master` / `main`  → build + deploy (manual play button, environment `prod`)
 #   git tag                 → build + deploy (manual play button, environment `prod`)
 #
 # GitLab CI/CD variables:
-#   AWS_ACCESS_KEY_ID      (masked)
-#   AWS_SECRET_ACCESS_KEY  (masked)
-#   K8S_SECRETS_ENV        FIRST_SUPERUSER_PASSWORD + SECRET_KEY (dotenv or JSON); scope per environment
+#   AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY  (masked)
+#   K8S_SECRETS_ENV        required for kustomize/helm only
+#   GITOPS_SSH_PRIVATE_KEY File or Variable: SSH private key with write access
+#                          to Piercuta/full-stack-git-ops
 #   AWS_REGION             optional, defaults to eu-west-1
-#   DEPLOY_TOOL            kustomize (default) | helm
+#   DEPLOY_TOOL            gitops (default) | kustomize | helm
+#   GITOPS_REPO            defaults to git@github.com:Piercuta/full-stack-git-ops.git
+#   GITOPS_BRANCH          defaults to main
 #
-# IAM: ssm:GetParameter on /test-k8s/* , ECR push, EKS API access.
+# IAM: ssm:GetParameter on /test-k8s/* , ECR push; EKS only if DEPLOY_TOOL != gitops.
 # The GitLab runner must allow Docker-in-Docker (privileged / docker:dind).
 
 workflow:
@@ -46,7 +51,9 @@ variables:
   AWS_DEFAULT_REGION: $AWS_REGION
   AWS_REGION: eu-west-1
   K8S_NAMESPACE: test-k8s
-  DEPLOY_TOOL: kustomize
+  DEPLOY_TOOL: gitops
+  GITOPS_REPO: git@github.com:Piercuta/full-stack-git-ops.git
+  GITOPS_BRANCH: main
   DOCKER_TLS_CERTDIR: "/certs"
 
 build:
@@ -117,24 +124,75 @@ deploy:
   resource_group: deploy-eks-$DEPLOY_ENV
   rules:
     - if: $CI_COMMIT_BRANCH == "dev"
+    - if: $CI_COMMIT_TAG
+      when: manual
     - when: manual
   before_script:
-    - apk add --no-cache aws-cli jq curl
-    - curl -sLO "https://dl.k8s.io/release/v1.32.3/bin/linux/amd64/kubectl"
-    - chmod +x kubectl && mv kubectl /usr/local/bin/kubectl
-    - kubectl version --client
     - |
-      if [ "${DEPLOY_TOOL}" = "helm" ]; then
-        curl -sL "https://get.helm.sh/helm-v3.16.4-linux-amd64.tar.gz" | tar xz
-        mv linux-amd64/helm /usr/local/bin/helm
-        helm version
+      if [ "${DEPLOY_TOOL}" = "gitops" ]; then
+        apk add --no-cache git openssh-client
       else
-        curl -sL "https://github.com/kubernetes-sigs/kustomize/releases/download/kustomize%2Fv5.6.0/kustomize_v5.6.0_linux_amd64.tar.gz" | tar xz
-        mv kustomize /usr/local/bin/kustomize
-        kustomize version
+        apk add --no-cache aws-cli jq curl
+        curl -sLO "https://dl.k8s.io/release/v1.32.3/bin/linux/amd64/kubectl"
+        chmod +x kubectl && mv kubectl /usr/local/bin/kubectl
+        kubectl version --client
+        if [ "${DEPLOY_TOOL}" = "helm" ]; then
+          curl -sL "https://get.helm.sh/helm-v3.16.4-linux-amd64.tar.gz" | tar xz
+          mv linux-amd64/helm /usr/local/bin/helm
+          helm version
+        else
+          curl -sL "https://github.com/kubernetes-sigs/kustomize/releases/download/kustomize%2Fv5.6.0/kustomize_v5.6.0_linux_amd64.tar.gz" | tar xz
+          mv kustomize /usr/local/bin/kustomize
+          kustomize version
+        fi
       fi
   script:
     - |
+      set -euo pipefail
+      if [ "${DEPLOY_TOOL}" = "gitops" ]; then
+        if [ -z "${GITOPS_SSH_PRIVATE_KEY:-}" ]; then
+          echo "Missing GITOPS_SSH_PRIVATE_KEY (File or Variable CI/CD)" >&2
+          exit 1
+        fi
+        mkdir -p ~/.ssh
+        chmod 700 ~/.ssh
+        if [ -f "${GITOPS_SSH_PRIVATE_KEY}" ]; then
+          cp "${GITOPS_SSH_PRIVATE_KEY}" ~/.ssh/id_ed25519
+        else
+          printf '%s\n' "${GITOPS_SSH_PRIVATE_KEY}" > ~/.ssh/id_ed25519
+        fi
+        chmod 600 ~/.ssh/id_ed25519
+        ssh-keyscan -t rsa,ecdsa,ed25519 github.com >> ~/.ssh/known_hosts 2>/dev/null
+
+        VALUES_FILE="apps/fastapi-app/values-${DEPLOY_ENV}.yaml"
+        git clone --depth 1 --branch "${GITOPS_BRANCH}" "${GITOPS_REPO}" gitops-repo
+        cd gitops-repo
+        if [ ! -f "$VALUES_FILE" ]; then
+          echo "Missing ${VALUES_FILE} on ${GITOPS_BRANCH}" >&2
+          exit 1
+        fi
+        awk -v repo="$ECR_URI" -v tag="$IMAGE_TAG" '
+          BEGIN { in_image = 0 }
+          /^image:/ { in_image = 1; print; next }
+          in_image && /^[^ ]/ { in_image = 0 }
+          in_image && /^[[:space:]]+repository:/ { print "  repository: " repo; next }
+          in_image && /^[[:space:]]+tag:/ { print "  tag: \"" tag "\""; next }
+          { print }
+        ' "$VALUES_FILE" > "${VALUES_FILE}.tmp"
+        mv "${VALUES_FILE}.tmp" "$VALUES_FILE"
+        git config user.email "gitlab-ci@users.noreply.github.com"
+        git config user.name "gitlab-ci"
+        git add "$VALUES_FILE"
+        if git diff --staged --quiet; then
+          echo "Image tag already ${IMAGE_TAG}; nothing to commit."
+          exit 0
+        fi
+        git commit -m "chore(fastapi-app): bump image to ${IMAGE_TAG} (${DEPLOY_ENV})"
+        git push origin "HEAD:${GITOPS_BRANCH}"
+        echo "Pushed GitOps update; Argo CD will sync automatically."
+        exit 0
+      fi
+
       if [ -z "$K8S_SECRETS_ENV" ]; then
         echo "Missing GitLab CI variable K8S_SECRETS_ENV on environment ${DEPLOY_ENV}" >&2
         exit 1
@@ -149,15 +207,13 @@ deploy:
       else
         printf '%s\n' "$CONTENT" > /tmp/secrets.env
       fi
-    - aws eks update-kubeconfig --name "${CLUSTER}" --region "${AWS_REGION}"
-    - |
+      aws eks update-kubeconfig --name "${CLUSTER}" --region "${AWS_REGION}"
       echo "GitLab CI IAM identity (this ARN needs an EKS access entry):"
       aws sts get-caller-identity
       if ! kubectl get namespace "${K8S_NAMESPACE}"; then
-        echo "EKS rejected these credentials. Add this IAM principal as an access entry on ${CLUSTER} with AmazonEKSClusterAdminPolicy (terraform cluster_admin_principal_arns)." >&2
+        echo "EKS rejected these credentials." >&2
         exit 1
       fi
-    - |
       if [ "${DEPLOY_TOOL}" = "helm" ]; then
         REPLICAS=1
         INGRESS_HOST="api-test-k8s.dev.piercuta.com"
