@@ -10,6 +10,9 @@
 #                        GitOps values-prod.yaml image.tag = git tag (e.g. v1.2.3)
 #   workflow_dispatch  → build + deploy (env from ref: `dev` → dev, else prod)
 #
+# Manual DB migrate (separate workflow):
+#   Actions → "Migrate database" → Run workflow → choose dev|prod
+#
 # Secrets:
 #   K8S_SECRETS_ENV          required for kustomize/helm only
 #   GITOPS_SSH_PRIVATE_KEY   required for gitops (SSH key with write access

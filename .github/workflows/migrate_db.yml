@@ -1,0 +1,123 @@
+# Manual DB migrate / seed for FastAPI (Alembic + initial_data).
+# Equivalent of a GitLab "manual" job: you choose when to run it.
+#
+# Actions → "Migrate database" → Run workflow → pick environment (dev|prod).
+#
+# Runs: bash scripts/prestart.sh in a one-shot pod using the same image,
+# ServiceAccount, ConfigMap and Secret as the fastapi-app Deployment.
+
+name: Migrate database
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: Target environment (SSM prefix + GitHub environment)
+        required: true
+        type: choice
+        options:
+          - dev
+          - prod
+      image:
+        description: Optional image override (leave empty = use Deployment image)
+        required: false
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  K8S_NAMESPACE: test-k8s
+  DEPLOY_ENV: ${{ inputs.environment }}
+  SSM_PREFIX: /test-k8s/${{ inputs.environment }}
+
+jobs:
+  migrate:
+    name: Run prestart (alembic + initial data)
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment }}
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION || 'eu-west-1' }}
+
+      - name: Install kubectl
+        uses: azure/setup-kubectl@v4
+        with:
+          version: v1.32.3
+
+      - name: Update kubeconfig
+        run: |
+          CLUSTER=$(aws ssm get-parameter --name "${SSM_PREFIX}/eks_cluster_name" --query Parameter.Value --output text)
+          if [ -z "$CLUSTER" ] || [ "$CLUSTER" = "None" ]; then
+            echo "Missing SSM ${SSM_PREFIX}/eks_cluster_name" >&2
+            exit 1
+          fi
+          echo "CLUSTER=${CLUSTER}" >> "$GITHUB_ENV"
+          aws eks update-kubeconfig --name "${CLUSTER}" --region "${{ vars.AWS_REGION || 'eu-west-1' }}"
+
+      - name: Resolve image
+        id: image
+        run: |
+          set -euo pipefail
+          if [ -n "${{ inputs.image }}" ]; then
+            IMG="${{ inputs.image }}"
+          else
+            IMG=$(kubectl -n "${K8S_NAMESPACE}" get deploy fastapi-app \
+              -o jsonpath='{.spec.template.spec.containers[0].image}')
+          fi
+          if [ -z "$IMG" ]; then
+            echo "Could not resolve image (is fastapi-app deployed?)" >&2
+            exit 1
+          fi
+          echo "image=${IMG}" >> "$GITHUB_OUTPUT"
+          echo "Using image: ${IMG}"
+
+      - name: Run migrate Job
+        env:
+          IMG: ${{ steps.image.outputs.image }}
+        run: |
+          set -euo pipefail
+          JOB="fastapi-migrate-${GITHUB_RUN_ID}"
+          kubectl -n "${K8S_NAMESPACE}" delete job "${JOB}" --ignore-not-found
+          printf '%s\n' \
+            "apiVersion: batch/v1" \
+            "kind: Job" \
+            "metadata:" \
+            "  name: ${JOB}" \
+            "  labels:" \
+            "    app.kubernetes.io/name: fastapi-migrate" \
+            "    app.kubernetes.io/part-of: fastapi-app" \
+            "spec:" \
+            "  ttlSecondsAfterFinished: 600" \
+            "  backoffLimit: 0" \
+            "  template:" \
+            "    spec:" \
+            "      restartPolicy: Never" \
+            "      serviceAccountName: fastapi-app" \
+            "      containers:" \
+            "        - name: migrate" \
+            "          image: ${IMG}" \
+            "          imagePullPolicy: IfNotPresent" \
+            "          command: [\"bash\", \"scripts/prestart.sh\"]" \
+            "          envFrom:" \
+            "            - configMapRef:" \
+            "                name: fastapi-app-config" \
+            "            - secretRef:" \
+            "                name: fastapi-app-secrets" \
+            > /tmp/migrate-job.yaml
+          kubectl -n "${K8S_NAMESPACE}" apply -f /tmp/migrate-job.yaml
+
+          echo "Waiting for job ${JOB}..."
+          if ! kubectl -n "${K8S_NAMESPACE}" wait --for=condition=complete "job/${JOB}" --timeout=300s; then
+            echo "Job failed or timed out. Logs:" >&2
+            kubectl -n "${K8S_NAMESPACE}" logs "job/${JOB}" || true
+            kubectl -n "${K8S_NAMESPACE}" describe "job/${JOB}" || true
+            exit 1
+          fi
+          kubectl -n "${K8S_NAMESPACE}" logs "job/${JOB}"
+          echo "Migrate job completed successfully."

@@ -45,6 +45,7 @@ workflow:
 stages:
   - build
   - deploy
+  - migrate
 
 variables:
   PROJECT_NAME: test-k8s
@@ -269,3 +270,57 @@ deploy:
         kubectl apply -k "k8s/overlays/${OVERLAY}"
         kubectl rollout status "deployment/fastapi-app" -n "${K8S_NAMESPACE}" --timeout=180s
       fi
+
+# Manual one-shot: alembic upgrade + initial_data (same as local kubectl Job).
+migrate:
+  stage: migrate
+  image: alpine:3.21
+  needs: []
+  environment:
+    name: $DEPLOY_ENV
+  resource_group: migrate-eks-$DEPLOY_ENV
+  rules:
+    - when: manual
+      allow_failure: true
+  before_script:
+    - apk add --no-cache aws-cli curl
+    - curl -sLO "https://dl.k8s.io/release/v1.32.3/bin/linux/amd64/kubectl"
+    - chmod +x kubectl && mv kubectl /usr/local/bin/kubectl
+  script:
+    - |
+      set -euo pipefail
+      CLUSTER=$(aws ssm get-parameter --name "${SSM_PREFIX}/eks_cluster_name" --query Parameter.Value --output text)
+      aws eks update-kubeconfig --name "${CLUSTER}" --region "${AWS_REGION}"
+      IMG=$(kubectl -n "${K8S_NAMESPACE}" get deploy fastapi-app \
+        -o jsonpath='{.spec.template.spec.containers[0].image}')
+      JOB="fastapi-migrate-${CI_PIPELINE_ID}"
+      kubectl -n "${K8S_NAMESPACE}" delete job "${JOB}" --ignore-not-found
+      printf '%s\n' \
+        "apiVersion: batch/v1" \
+        "kind: Job" \
+        "metadata:" \
+        "  name: ${JOB}" \
+        "spec:" \
+        "  ttlSecondsAfterFinished: 600" \
+        "  backoffLimit: 0" \
+        "  template:" \
+        "    spec:" \
+        "      restartPolicy: Never" \
+        "      serviceAccountName: fastapi-app" \
+        "      containers:" \
+        "        - name: migrate" \
+        "          image: ${IMG}" \
+        "          imagePullPolicy: IfNotPresent" \
+        "          command: [\"bash\", \"scripts/prestart.sh\"]" \
+        "          envFrom:" \
+        "            - configMapRef:" \
+        "                name: fastapi-app-config" \
+        "            - secretRef:" \
+        "                name: fastapi-app-secrets" \
+        > /tmp/migrate-job.yaml
+      kubectl -n "${K8S_NAMESPACE}" apply -f /tmp/migrate-job.yaml
+      if ! kubectl -n "${K8S_NAMESPACE}" wait --for=condition=complete "job/${JOB}" --timeout=300s; then
+        kubectl -n "${K8S_NAMESPACE}" logs "job/${JOB}" || true
+        exit 1
+      fi
+      kubectl -n "${K8S_NAMESPACE}" logs "job/${JOB}"
