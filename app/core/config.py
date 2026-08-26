@@ -4,7 +4,6 @@ from typing import Annotated, Any, Literal
 from urllib.parse import quote_plus
 import json
 import boto3
-from botocore.exceptions import ClientError
 
 from pydantic import (
     AnyUrl,
@@ -60,7 +59,9 @@ class Settings(BaseSettings):
     POSTGRES_USER: str
     POSTGRES_PASSWORD: str = ""
     POSTGRES_DB: str = ""
+    # Prefer AWS_SECRET_ARN_SSM_PARAM (stable path); AWS_SECRET_ARN remains as override/fallback.
     AWS_SECRET_ARN: str | None = None
+    AWS_SECRET_ARN_SSM_PARAM: str | None = None
     AWS_REGION: str = "eu-west-1"
     MEDIA_QUEUE_URL: str | None = None
 
@@ -69,25 +70,41 @@ class Settings(BaseSettings):
     MAX_AVATAR_SIZE: int = 5 * 1024 * 1024  # 5MB
     ALLOWED_AVATAR_TYPES: list[str] = ["image/jpeg", "image/png", "image/gif", "image/webp"]
 
+    def _resolve_secret_arn(self) -> str | None:
+        """Resolve Secrets Manager ARN from SSM, or use AWS_SECRET_ARN directly."""
+        if self.AWS_SECRET_ARN_SSM_PARAM:
+            session = boto3.session.Session()
+            ssm = session.client("ssm", region_name=self.AWS_REGION)
+            response = ssm.get_parameter(Name=self.AWS_SECRET_ARN_SSM_PARAM)
+            arn = (response.get("Parameter") or {}).get("Value") or ""
+            if not arn:
+                raise ValueError(
+                    f"SSM parameter {self.AWS_SECRET_ARN_SSM_PARAM} is empty"
+                )
+            return arn
+        return self.AWS_SECRET_ARN
+
     def _get_secret(self) -> str:
-        if not self.AWS_SECRET_ARN:
-            print("[DEBUG] Pas de AWS_SECRET_ARN, fallback POSTGRES_PASSWORD")
+        try:
+            secret_id = self._resolve_secret_arn()
+        except Exception as e:
+            print(f"[ERROR] Failed to resolve secret ARN: {e}")
+            return self.POSTGRES_PASSWORD
+
+        if not secret_id:
             return self.POSTGRES_PASSWORD
 
         try:
-            print(f"[DEBUG] Tentative de lecture du secret: {self.AWS_SECRET_ARN}")
             session = boto3.session.Session()
             client = session.client(
-                service_name='secretsmanager',
-                region_name=self.AWS_REGION
+                service_name="secretsmanager",
+                region_name=self.AWS_REGION,
             )
-            response = client.get_secret_value(SecretId=self.AWS_SECRET_ARN)
-            secret = json.loads(response['SecretString'])
-            print(f"[DEBUG] Secret récupéré: {secret}")
-            print(f"[PARFAIT] Secret récupéré: {secret}")
-            return secret.get('password', self.POSTGRES_PASSWORD)
+            response = client.get_secret_value(SecretId=secret_id)
+            secret = json.loads(response["SecretString"])
+            return secret.get("password", self.POSTGRES_PASSWORD)
         except Exception as e:
-            print(f"[ERROR] Impossible de récupérer le secret : {e}")
+            print(f"[ERROR] Failed to fetch Secrets Manager secret: {e}")
             return self.POSTGRES_PASSWORD
 
     @computed_field  # type: ignore[prop-decorator]
@@ -143,7 +160,7 @@ class Settings(BaseSettings):
     @model_validator(mode="after")
     def _enforce_non_default_secrets(self) -> Self:
         self._check_default_secret("SECRET_KEY", self.SECRET_KEY)
-        if not self.AWS_SECRET_ARN:
+        if not self.AWS_SECRET_ARN and not self.AWS_SECRET_ARN_SSM_PARAM:
             self._check_default_secret("POSTGRES_PASSWORD", self.POSTGRES_PASSWORD)
         self._check_default_secret(
             "FIRST_SUPERUSER_PASSWORD", self.FIRST_SUPERUSER_PASSWORD
