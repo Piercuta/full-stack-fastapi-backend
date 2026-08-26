@@ -220,7 +220,7 @@ deploy:
         INGRESS_HOST="api-test-k8s.dev.piercuta.com"
         if [ "${DEPLOY_ENV}" != "dev" ]; then
           REPLICAS=2
-          INGRESS_HOST="api.test-k8s.prod.piercuta.com"
+          INGRESS_HOST="api-test-k8s.prod.piercuta.com"
         fi
         {
           printf '%s\n' \
