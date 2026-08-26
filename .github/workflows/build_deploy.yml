@@ -145,7 +145,7 @@ jobs:
       github.event_name == 'workflow_dispatch'
     environment: ${{ github.ref_name }}
     concurrency:
-      group: deploy-eks-${{ github.ref_name == 'dev' && 'dev' || 'prod' }}
+      group: deploy-eks-${{ github.ref_name }}
       cancel-in-progress: false
     steps:
       - name: Checkout
