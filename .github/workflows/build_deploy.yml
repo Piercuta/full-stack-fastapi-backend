@@ -5,8 +5,9 @@
 #   - kustomize / helm: apply directly to EKS (legacy / fallback)
 #
 # Triggers:
-#   push `dev`         → build + deploy (environment `dev`)
-#   push tag           → build + deploy prod (tag commit must be on branch `prod`)
+#   push `dev`         → build + deploy (environment `dev`); ECR :sha + :dev
+#   push tag on `prod` → build + deploy prod; ECR :sha + :latest + :<git-tag>
+#                        GitOps values-prod.yaml image.tag = git tag (e.g. v1.2.3)
 #   workflow_dispatch  → build + deploy (env from ref: `dev` → dev, else prod)
 #
 # Secrets:
@@ -62,7 +63,8 @@ jobs:
       aws_secret_arn: ${{ steps.ssm.outputs.aws_secret_arn }}
       irsa_role_arn: ${{ steps.ssm.outputs.irsa_role_arn }}
       media_queue_url: ${{ steps.ssm.outputs.media_queue_url }}
-      image_tag: ${{ github.sha }}
+      # Prod tags: use git tag (v1.2.3) in GitOps; otherwise commit SHA
+      image_tag: ${{ steps.meta.outputs.image_tag }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -118,6 +120,32 @@ jobs:
           echo "media_queue_url=${MEDIA_QUEUE_URL}" >> "$GITHUB_OUTPUT"
           echo "Cluster=${CLUSTER} ECR=${ECR_URI}"
 
+      - name: Resolve image tags
+        id: meta
+        env:
+          ECR_URI: ${{ steps.ssm.outputs.ecr_uri }}
+        run: |
+          set -euo pipefail
+          # Always push immutable SHA + floating tag (dev / latest)
+          {
+            echo "${ECR_URI}:${GITHUB_SHA}"
+            echo "${ECR_URI}:${FLOATING_TAG}"
+          } > /tmp/ecr-tags.txt
+
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            echo "${ECR_URI}:${GITHUB_REF_NAME}" >> /tmp/ecr-tags.txt
+            echo "image_tag=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+            echo "GitOps / deploy image tag: ${GITHUB_REF_NAME}"
+          else
+            echo "image_tag=${GITHUB_SHA}" >> "$GITHUB_OUTPUT"
+            echo "GitOps / deploy image tag: ${GITHUB_SHA}"
+          fi
+
+          # Comma-separated list for docker/build-push-action
+          TAGS=$(paste -sd, /tmp/ecr-tags.txt)
+          echo "tags=${TAGS}" >> "$GITHUB_OUTPUT"
+          echo "ECR tags: ${TAGS}"
+
       - name: Login to Amazon ECR
         uses: aws-actions/amazon-ecr-login@v2
 
@@ -129,9 +157,7 @@ jobs:
         with:
           context: .
           push: true
-          tags: |
-            ${{ steps.ssm.outputs.ecr_uri }}:${{ github.sha }}
-            ${{ steps.ssm.outputs.ecr_uri }}:${{ env.FLOATING_TAG }}
+          tags: ${{ steps.meta.outputs.tags }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
