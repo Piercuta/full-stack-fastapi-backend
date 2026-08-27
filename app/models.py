@@ -1,5 +1,6 @@
 import uuid
 from datetime import datetime, timezone
+from enum import Enum
 
 from fastapi import UploadFile
 from pydantic import EmailStr
@@ -157,3 +158,48 @@ class DashboardStats(SQLModel):
     jobs_failed: int
     api_healthy: bool
     series: list[DashboardSeriesPoint]
+
+
+class MediaJobStatus(str, Enum):
+    queued = "queued"
+    processing = "processing"
+    done = "done"
+    failed = "failed"
+
+
+class MediaJob(SQLModel, table=True):
+    id: uuid.UUID = Field(default_factory=uuid.uuid4, primary_key=True)
+    owner_id: uuid.UUID = Field(
+        foreign_key="user.id", nullable=False, ondelete="CASCADE", index=True
+    )
+    status: MediaJobStatus = Field(default=MediaJobStatus.queued, index=True)
+    original_s3_key: str = Field(max_length=512)
+    original_url: str = Field(max_length=1024)
+    content_type: str | None = Field(default=None, max_length=128)
+    result_urls: str | None = Field(default=None)  # JSON list of variant URLs
+    error: str | None = Field(default=None, max_length=1024)
+    created_at: datetime = Field(default_factory=_utc_now, index=True)
+    updated_at: datetime = Field(default_factory=_utc_now)
+
+
+class MediaJobPublic(SQLModel):
+    id: uuid.UUID
+    status: MediaJobStatus
+    original_s3_key: str
+    original_url: str
+    content_type: str | None = None
+    result_urls: list[str] = []
+    error: str | None = None
+    created_at: datetime
+    updated_at: datetime
+
+
+class MediaJobsPublic(SQLModel):
+    data: list[MediaJobPublic]
+    count: int
+
+
+class MediaJobStatusUpdate(SQLModel):
+    status: MediaJobStatus
+    error: str | None = None
+    variant_keys: list[str] = []

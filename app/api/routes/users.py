@@ -290,10 +290,23 @@ def upload_avatar(
             session.refresh(current_user)
 
             if s3_key:
+                from app.models import MediaJob, MediaJobStatus
+
+                job = MediaJob(
+                    owner_id=current_user.id,
+                    status=MediaJobStatus.queued,
+                    original_s3_key=s3_key,
+                    original_url=cloudfront_url,
+                    content_type=file.content_type,
+                )
+                session.add(job)
+                session.commit()
+                session.refresh(job)
                 publish_media_uploaded(
                     s3_key=s3_key,
                     content_type=file.content_type,
                     user_id=str(current_user.id),
+                    job_id=str(job.id),
                 )
 
             return AvatarResponse(

@@ -64,6 +64,7 @@ class Settings(BaseSettings):
     AWS_SECRET_ARN_SSM_PARAM: str | None = None
     AWS_REGION: str = "eu-west-1"
     MEDIA_QUEUE_URL: str | None = None
+    MEDIA_WORKER_SECRET: str | None = None
 
     # Cognito OIDC (optional). Domain may be a full Hosted UI URL or the prefix only.
     COGNITO_CLIENT_ID: str | None = None

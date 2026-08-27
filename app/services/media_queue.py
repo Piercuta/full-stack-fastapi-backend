@@ -16,6 +16,7 @@ def publish_media_uploaded(
     s3_key: str,
     content_type: str | None,
     user_id: str | None = None,
+    job_id: str | None = None,
 ) -> None:
     if not settings.MEDIA_QUEUE_URL:
         return
@@ -24,6 +25,7 @@ def publish_media_uploaded(
         "s3Key": s3_key,
         "contentType": content_type,
         "userId": user_id,
+        "jobId": job_id,
     }
     try:
         client = boto3.client("sqs", region_name=settings.AWS_REGION)

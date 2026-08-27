@@ -13,7 +13,7 @@ from sqlmodel import select
 
 from app.api.deps import CurrentUser, SessionDep
 from app.core.config import settings
-from app.models import DashboardSeriesPoint, DashboardStats, Item, User
+from app.models import DashboardSeriesPoint, DashboardStats, Item, MediaJob, MediaJobStatus, User
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/dashboard", tags=["dashboard"])
@@ -61,8 +61,8 @@ def read_dashboard_stats(
     """
     Aggregate stats for the home dashboard.
     Chart series = items created per day (last 7 days UTC).
-    Avatars = users with avatar_url set (no per-upload timestamp yet).
-    Jobs ≈ SQS approximate depth when MEDIA_QUEUE_URL is configured.
+    Avatars = users with avatar_url set.
+    Jobs pending/failed = MediaJob rows (queued/processing vs failed).
     """
     _ = current_user
 
@@ -72,7 +72,16 @@ def read_dashboard_stats(
         select(func.count()).select_from(User).where(User.avatar_url != None)  # noqa: E711
     ).one()
 
-    jobs_pending, jobs_failed = _sqs_queue_depth()
+    jobs_pending = session.exec(
+        select(func.count())
+        .select_from(MediaJob)
+        .where(MediaJob.status.in_([MediaJobStatus.queued, MediaJobStatus.processing]))
+    ).one()
+    jobs_failed = session.exec(
+        select(func.count())
+        .select_from(MediaJob)
+        .where(MediaJob.status == MediaJobStatus.failed)
+    ).one()
     api_healthy = _file_service_healthy()
 
     today = datetime.now(timezone.utc).date()
@@ -101,8 +110,8 @@ def read_dashboard_stats(
         users=int(users),
         items=int(items),
         avatars=int(avatars),
-        jobs_pending=jobs_pending,
-        jobs_failed=jobs_failed,
+        jobs_pending=int(jobs_pending),
+        jobs_failed=int(jobs_failed),
         api_healthy=api_healthy,
         series=series,
     )
