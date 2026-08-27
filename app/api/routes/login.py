@@ -69,6 +69,7 @@ def login_cognito(session: SessionDep, body: CognitoLogin) -> Token:
             redirect_uri=body.redirect_uri,
             code_verifier=body.code_verifier,
         )
+        logging.info(f"tokens: {tokens}")
     except httpx.HTTPError as exc:
         logger.warning("Cognito token exchange error: %s", exc)
         raise HTTPException(
@@ -81,6 +82,7 @@ def login_cognito(session: SessionDep, body: CognitoLogin) -> Token:
 
     try:
         claims = validate_id_token(id_token)
+        logging.info(f"claims: {claims}")
     except (InvalidTokenError, ValueError, KeyError) as exc:
         logger.warning("Invalid Cognito id_token: %s", exc)
         raise HTTPException(status_code=400, detail="Invalid Cognito ID token") from exc
@@ -89,6 +91,7 @@ def login_cognito(session: SessionDep, body: CognitoLogin) -> Token:
     if access_token:
         try:
             userinfo = fetch_user_info(access_token)
+            logging.info(f"userinfo: {userinfo}")
             # Prefer userInfo profile fields when id_token omits them.
             for key in ("name", "given_name", "family_name", "email", "email_verified"):
                 if key not in claims or claims.get(key) in (None, ""):
