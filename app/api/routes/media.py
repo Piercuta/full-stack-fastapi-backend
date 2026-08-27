@@ -49,10 +49,22 @@ def _to_public(job: MediaJob) -> MediaJobPublic:
     )
 
 
-def _variant_url(original_url: str, variant_key: str) -> str:
-    """Rebuild a CloudFront/public URL for a variant S3 key."""
+def _variant_url(original_url: str, original_s3_key: str, variant_key: str) -> str:
+    """Rebuild a public URL for a variant S3 key.
+
+    file-service builds URLs as https://{CLOUDFRONT_DOMAIN}/{s3_key} where
+    CLOUDFRONT_DOMAIN may already include a path prefix (e.g. host/media).
+    """
+    key = original_s3_key.lstrip("/")
+    if key and original_url.endswith(key):
+        return original_url[: -len(key)] + variant_key.lstrip("/")
     parts = urlsplit(original_url)
-    return urlunsplit((parts.scheme, parts.netloc, "/" + variant_key.lstrip("/"), "", ""))
+    # Fallback: keep path directory of the original object.
+    path = parts.path.rsplit("/", 1)[0] if "/" in parts.path else ""
+    variant_name = variant_key.lstrip("/").rsplit("/", 1)[-1]
+    return urlunsplit(
+        (parts.scheme, parts.netloc, f"{path}/{variant_name}", "", "")
+    )
 
 
 def _create_job_and_enqueue(
@@ -206,7 +218,10 @@ def update_media_job_status(
     keys = variant_keys or []
     if keys:
         job.result_urls = json.dumps(
-            [_variant_url(job.original_url, key) for key in keys]
+            [
+                _variant_url(job.original_url, job.original_s3_key, key)
+                for key in keys
+            ]
         )
     session.add(job)
     session.commit()
