@@ -99,7 +99,21 @@ def login_cognito(session: SessionDep, body: CognitoLogin) -> Token:
     ):
         raise HTTPException(status_code=400, detail="Cognito email is not verified")
 
-    full_name = claims.get("name") or claims.get("cognito:username")
+    full_name = (
+        claims.get("name")
+        or " ".join(
+            part
+            for part in (claims.get("given_name"), claims.get("family_name"))
+            if part
+        )
+        or email.split("@", 1)[0]
+    )
+    # Ignore Cognito federated usernames like "google_123..."
+    if isinstance(full_name, str) and full_name.startswith(
+        ("google_", "Facebook_", "LoginWithAmazon_", "SignInWithApple_")
+    ):
+        full_name = email.split("@", 1)[0]
+
     user = crud.get_user_by_email(session=session, email=email)
     if not user:
         user = crud.create_user(
@@ -114,7 +128,12 @@ def login_cognito(session: SessionDep, body: CognitoLogin) -> Token:
         )
     elif not user.is_active:
         raise HTTPException(status_code=400, detail="Inactive user")
-    elif full_name and not user.full_name:
+    elif full_name and (
+        not user.full_name
+        or user.full_name.startswith(
+            ("google_", "Facebook_", "LoginWithAmazon_", "SignInWithApple_")
+        )
+    ):
         user.full_name = full_name
         session.add(user)
         session.commit()
