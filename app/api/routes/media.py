@@ -10,7 +10,7 @@ from typing import Any
 from urllib.parse import urlsplit, urlunsplit
 
 import httpx
-from fastapi import APIRouter, File, Header, HTTPException, UploadFile
+from fastapi import APIRouter, File, Header, HTTPException, Query, UploadFile
 from sqlmodel import col, func, select
 
 from app.api.deps import CurrentUser, SessionDep
@@ -20,7 +20,6 @@ from app.models import (
     MediaJobPublic,
     MediaJobsPublic,
     MediaJobStatus,
-    MediaJobStatusUpdate,
 )
 from app.services.media_queue import publish_media_uploaded
 
@@ -182,11 +181,17 @@ def get_media_job(
 )
 def update_media_job_status(
     job_id: uuid.UUID,
-    body: MediaJobStatusUpdate,
     session: SessionDep,
+    status: MediaJobStatus = Query(...),
+    error: str | None = Query(None),
+    variant_keys: list[str] = Query(default=[]),
     x_media_worker_secret: str | None = Header(default=None),
 ) -> Any:
-    """Internal callback used by media-worker (optional shared secret)."""
+    """Internal callback used by media-worker (optional shared secret).
+
+    Accepts query params (preferred) so HTTP clients / OTEL agents that drop
+    request bodies still work: ?status=done&variant_keys=a&variant_keys=b
+    """
     expected = settings.MEDIA_WORKER_SECRET
     if expected and x_media_worker_secret != expected:
         raise HTTPException(status_code=403, detail="Invalid worker secret")
@@ -195,12 +200,13 @@ def update_media_job_status(
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
 
-    job.status = body.status
-    job.error = body.error
+    job.status = status
+    job.error = error
     job.updated_at = datetime.now(timezone.utc)
-    if body.variant_keys:
+    keys = variant_keys or []
+    if keys:
         job.result_urls = json.dumps(
-            [_variant_url(job.original_url, key) for key in body.variant_keys]
+            [_variant_url(job.original_url, key) for key in keys]
         )
     session.add(job)
     session.commit()
