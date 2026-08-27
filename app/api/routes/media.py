@@ -80,11 +80,10 @@ def _create_job_and_enqueue(
     try:
         with httpx.Client() as client:
             files = {"file": (file.filename, file.file, file.content_type)}
-            data = {"folder": folder}
             response = client.post(
                 f"{settings.FILE_SERVICE_URL}/upload",
+                params={"folder": folder},
                 files=files,
-                data=data,
                 timeout=30.0,
             )
             response.raise_for_status()
@@ -176,7 +175,11 @@ def get_media_job(
     return _to_public(job)
 
 
-@router.patch("/jobs/{job_id}/status", response_model=MediaJobPublic)
+@router.api_route(
+    "/jobs/{job_id}/status",
+    methods=["POST", "PATCH"],
+    response_model=MediaJobPublic,
+)
 def update_media_job_status(
     job_id: uuid.UUID,
     body: MediaJobStatusUpdate,

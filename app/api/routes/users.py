@@ -262,12 +262,11 @@ def upload_avatar(
         # Upload to file service
         with httpx.Client() as client:
             files = {"file": (file.filename, file.file, file.content_type)}
-            data = {"folder": "avatars"}
 
             response = client.post(
                 f"{settings.FILE_SERVICE_URL}/upload",
+                params={"folder": "avatars"},
                 files=files,
-                data=data,
                 timeout=30.0
             )
             response.raise_for_status()
