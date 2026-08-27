@@ -65,6 +65,12 @@ class Settings(BaseSettings):
     AWS_REGION: str = "eu-west-1"
     MEDIA_QUEUE_URL: str | None = None
 
+    # Cognito OIDC (optional). Domain may be a full Hosted UI URL or the prefix only.
+    COGNITO_CLIENT_ID: str | None = None
+    COGNITO_CLIENT_SECRET: str | None = None
+    COGNITO_DOMAIN: str | None = None
+    COGNITO_ISSUER: str | None = None
+
     # File Service Configuration
     FILE_SERVICE_URL: str = "http://file-service-svc.file-service.svc.cluster.local"
     MAX_AVATAR_SIZE: int = 5 * 1024 * 1024  # 5MB

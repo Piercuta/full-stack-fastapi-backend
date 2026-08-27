@@ -1,19 +1,25 @@
+import logging
+import secrets
 from datetime import timedelta
 from typing import Annotated, Any
 
+import httpx
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import HTMLResponse
 from fastapi.security import OAuth2PasswordRequestForm
-
-
-from starlette.concurrency import run_in_threadpool
+from jwt.exceptions import InvalidTokenError
 
 from app import crud
 from app.api.deps import CurrentUser, SessionDep, get_current_active_superuser
 from app.core import security
+from app.core.cognito import (
+    cognito_configured,
+    exchange_code_for_tokens,
+    validate_id_token,
+)
 from app.core.config import settings
 from app.core.security import get_password_hash
-from app.models import Message, NewPassword, Token, UserPublic
+from app.models import CognitoLogin, Message, NewPassword, Token, UserCreate, UserPublic
 from app.utils import (
     generate_password_reset_token,
     generate_reset_password_email,
@@ -21,6 +27,7 @@ from app.utils import (
     verify_password_reset_token,
 )
 
+logger = logging.getLogger(__name__)
 router = APIRouter(tags=["login"])
 
 
@@ -38,6 +45,71 @@ def login_access_token(
         raise HTTPException(status_code=400, detail="Incorrect email or password")
     elif not user.is_active:
         raise HTTPException(status_code=400, detail="Inactive user")
+    access_token_expires = timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
+    return Token(
+        access_token=security.create_access_token(
+            user.id, expires_delta=access_token_expires
+        )
+    )
+
+
+@router.post("/login/cognito", response_model=Token)
+def login_cognito(session: SessionDep, body: CognitoLogin) -> Token:
+    """
+    Exchange a Cognito Hosted UI authorization code for an application JWT (flow B).
+    """
+    if not cognito_configured():
+        raise HTTPException(status_code=501, detail="Cognito login is not configured")
+
+    try:
+        tokens = exchange_code_for_tokens(
+            code=body.code,
+            redirect_uri=body.redirect_uri,
+            code_verifier=body.code_verifier,
+        )
+    except httpx.HTTPError as exc:
+        logger.warning("Cognito token exchange error: %s", exc)
+        raise HTTPException(
+            status_code=400, detail="Failed to exchange Cognito authorization code"
+        ) from exc
+
+    id_token = tokens.get("id_token")
+    if not id_token:
+        raise HTTPException(status_code=400, detail="Cognito response missing id_token")
+
+    try:
+        claims = validate_id_token(id_token)
+    except (InvalidTokenError, ValueError, KeyError) as exc:
+        logger.warning("Invalid Cognito id_token: %s", exc)
+        raise HTTPException(status_code=400, detail="Invalid Cognito ID token") from exc
+
+    email = claims.get("email")
+    if not email:
+        raise HTTPException(status_code=400, detail="Cognito token has no email claim")
+    if claims.get("email_verified") is False:
+        raise HTTPException(status_code=400, detail="Cognito email is not verified")
+
+    full_name = claims.get("name") or claims.get("cognito:username")
+    user = crud.get_user_by_email(session=session, email=email)
+    if not user:
+        user = crud.create_user(
+            session=session,
+            user_create=UserCreate(
+                email=email,
+                password=secrets.token_urlsafe(24),
+                full_name=full_name,
+                is_active=True,
+                is_superuser=False,
+            ),
+        )
+    elif not user.is_active:
+        raise HTTPException(status_code=400, detail="Inactive user")
+    elif full_name and not user.full_name:
+        user.full_name = full_name
+        session.add(user)
+        session.commit()
+        session.refresh(user)
+
     access_token_expires = timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
     return Token(
         access_token=security.create_access_token(

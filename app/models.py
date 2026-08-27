@@ -106,6 +106,14 @@ class Token(SQLModel):
     token_type: str = "bearer"
 
 
+class CognitoLogin(SQLModel):
+    """Authorization code from Cognito Hosted UI (flow B → app JWT)."""
+
+    code: str
+    redirect_uri: str
+    code_verifier: str | None = None
+
+
 # Contents of JWT token
 class TokenPayload(SQLModel):
     sub: str | None = None
