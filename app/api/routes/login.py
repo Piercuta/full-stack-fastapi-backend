@@ -86,7 +86,17 @@ def login_cognito(session: SessionDep, body: CognitoLogin) -> Token:
     email = claims.get("email")
     if not email:
         raise HTTPException(status_code=400, detail="Cognito token has no email claim")
-    if claims.get("email_verified") is False:
+
+    # Cognito often sets email_verified=false for Google federation even when
+    # Google has verified the address. Trust federated IdPs; only enforce for
+    # native Cognito users when the claim is explicitly false.
+    email_verified = claims.get("email_verified")
+    identities = claims.get("identities")
+    is_federated = bool(identities)
+    if (
+        not is_federated
+        and email_verified in (False, "false", "False")
+    ):
         raise HTTPException(status_code=400, detail="Cognito email is not verified")
 
     full_name = claims.get("name") or claims.get("cognito:username")
