@@ -15,6 +15,8 @@ from app.core import security
 from app.core.cognito import (
     cognito_configured,
     exchange_code_for_tokens,
+    fetch_user_info,
+    resolve_display_name,
     validate_id_token,
 )
 from app.core.config import settings
@@ -83,6 +85,18 @@ def login_cognito(session: SessionDep, body: CognitoLogin) -> Token:
         logger.warning("Invalid Cognito id_token: %s", exc)
         raise HTTPException(status_code=400, detail="Invalid Cognito ID token") from exc
 
+    access_token = tokens.get("access_token")
+    if access_token:
+        try:
+            userinfo = fetch_user_info(access_token)
+            # Prefer userInfo profile fields when id_token omits them.
+            for key in ("name", "given_name", "family_name", "email", "email_verified"):
+                if key not in claims or claims.get(key) in (None, ""):
+                    if userinfo.get(key) not in (None, ""):
+                        claims[key] = userinfo[key]
+        except httpx.HTTPError as exc:
+            logger.warning("Cognito userInfo enrichment skipped: %s", exc)
+
     email = claims.get("email")
     if not email:
         raise HTTPException(status_code=400, detail="Cognito token has no email claim")
@@ -99,20 +113,7 @@ def login_cognito(session: SessionDep, body: CognitoLogin) -> Token:
     ):
         raise HTTPException(status_code=400, detail="Cognito email is not verified")
 
-    full_name = (
-        claims.get("name")
-        or " ".join(
-            part
-            for part in (claims.get("given_name"), claims.get("family_name"))
-            if part
-        )
-        or email.split("@", 1)[0]
-    )
-    # Ignore Cognito federated usernames like "google_123..."
-    if isinstance(full_name, str) and full_name.startswith(
-        ("google_", "Facebook_", "LoginWithAmazon_", "SignInWithApple_")
-    ):
-        full_name = email.split("@", 1)[0]
+    full_name = resolve_display_name(claims, email)
 
     user = crud.get_user_by_email(session=session, email=email)
     if not user:
@@ -133,6 +134,7 @@ def login_cognito(session: SessionDep, body: CognitoLogin) -> Token:
         or user.full_name.startswith(
             ("google_", "Facebook_", "LoginWithAmazon_", "SignInWithApple_")
         )
+        or (user.full_name == email.split("@", 1)[0] and full_name != user.full_name)
     ):
         user.full_name = full_name
         session.add(user)

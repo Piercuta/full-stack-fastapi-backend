@@ -78,3 +78,37 @@ def validate_id_token(id_token: str) -> dict[str, Any]:
         audience=settings.COGNITO_CLIENT_ID,
         issuer=issuer,
     )
+
+
+def fetch_user_info(access_token: str) -> dict[str, Any]:
+    """Fetch OIDC userInfo (often has name/given_name when id_token does not)."""
+    userinfo_url = urljoin(_hosted_ui_base() + "/", "oauth2/userInfo")
+    with httpx.Client(timeout=15.0) as client:
+        response = client.get(
+            userinfo_url,
+            headers={"Authorization": f"Bearer {access_token}"},
+        )
+        if response.status_code >= 400:
+            logger.warning(
+                "Cognito userInfo failed: %s %s",
+                response.status_code,
+                response.text[:500],
+            )
+            response.raise_for_status()
+        return response.json()
+
+
+def resolve_display_name(claims: dict[str, Any], email: str) -> str:
+    """Best-effort display name from Cognito/OIDC claims."""
+    full_name = claims.get("name") or " ".join(
+        part
+        for part in (claims.get("given_name"), claims.get("family_name"))
+        if part
+    )
+    if isinstance(full_name, str):
+        full_name = full_name.strip()
+    if not full_name or full_name.startswith(
+        ("google_", "Facebook_", "LoginWithAmazon_", "SignInWithApple_")
+    ):
+        full_name = email.split("@", 1)[0]
+    return full_name
