@@ -1,4 +1,5 @@
 import uuid
+from datetime import datetime, timezone
 
 from fastapi import UploadFile
 from pydantic import EmailStr
@@ -75,12 +76,17 @@ class ItemUpdate(ItemBase):
     title: str | None = Field(default=None, min_length=1, max_length=255)  # type: ignore
 
 
+def _utc_now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
 # Database model, database table inferred from class name
 class Item(ItemBase, table=True):
     id: uuid.UUID = Field(default_factory=uuid.uuid4, primary_key=True)
     owner_id: uuid.UUID = Field(
         foreign_key="user.id", nullable=False, ondelete="CASCADE"
     )
+    created_at: datetime = Field(default_factory=_utc_now, index=True)
     owner: User | None = Relationship(back_populates="items")
 
 
@@ -88,6 +94,7 @@ class Item(ItemBase, table=True):
 class ItemPublic(ItemBase):
     id: uuid.UUID
     owner_id: uuid.UUID
+    created_at: datetime | None = None
 
 
 class ItemsPublic(SQLModel):
@@ -135,3 +142,18 @@ class AvatarUpload(SQLModel):
 class AvatarResponse(SQLModel):
     avatar_url: str
     message: str = "Avatar uploaded successfully"
+
+
+class DashboardSeriesPoint(SQLModel):
+    date: str
+    items: int
+
+
+class DashboardStats(SQLModel):
+    users: int
+    items: int
+    avatars: int
+    jobs_pending: int
+    jobs_failed: int
+    api_healthy: bool
+    series: list[DashboardSeriesPoint]
