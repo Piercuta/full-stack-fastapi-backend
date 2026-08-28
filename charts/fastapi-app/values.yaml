@@ -41,10 +41,6 @@ config:
   FILE_SERVICE_URL: http://file-service
   AWS_REGION: eu-west-1
   FIRST_SUPERUSER: admin@example.com
-  POSTGRES_SERVER: ""
-  FRONTEND_HOST: ""
-  MEDIA_QUEUE_URL: ""
-  MEDIA_WORKER_SECRET: ""
 
 # SSM → K8s Secret via External Secrets Operator (GitOps / Helm on EKS).
 externalSecrets:
@@ -56,6 +52,5 @@ externalSecrets:
     serviceAccountName: external-secrets
     serviceAccountNamespace: external-secrets
 
-# Populated by CI from K8S_SECRETS_ENV (FIRST_SUPERUSER_PASSWORD, SECRET_KEY).
-# With externalSecrets.enabled=false, CI also injects AWS_SECRET_ARN + COGNITO_* via config.
+# Optional Helm-only secrets when ESO is disabled.
 secrets: {}

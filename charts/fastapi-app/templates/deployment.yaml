@@ -28,8 +28,10 @@ spec:
           envFrom:
             - configMapRef:
                 name: {{ include "fastapi-app.fullname" . }}-config
+            {{- if and .Values.secrets (gt (len .Values.secrets) 0) }}
             - secretRef:
                 name: {{ include "fastapi-app.fullname" . }}-secrets
+            {{- end }}
             {{- if .Values.externalSecrets.enabled }}
             - secretRef:
                 name: {{ include "fastapi-app.fullname" . }}-ssm
