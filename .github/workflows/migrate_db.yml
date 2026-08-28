@@ -4,7 +4,7 @@
 # Actions → "Migrate database" → Run workflow → pick environment (dev|prod).
 #
 # Runs: bash scripts/prestart.sh in a one-shot pod using the same image,
-# ServiceAccount, ConfigMap and Secret as the fastapi-app Deployment.
+# ServiceAccount, ConfigMap and ESO secret as the fastapi-app Deployment.
 
 name: Migrate database
 
@@ -108,7 +108,7 @@ jobs:
             "            - configMapRef:" \
             "                name: fastapi-app-config" \
             "            - secretRef:" \
-            "                name: fastapi-app-secrets" \
+            "                name: fastapi-app-ssm" \
             > /tmp/migrate-job.yaml
           kubectl -n "${K8S_NAMESPACE}" apply -f /tmp/migrate-job.yaml
 

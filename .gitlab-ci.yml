@@ -327,7 +327,7 @@ migrate:
         "            - configMapRef:" \
         "                name: fastapi-app-config" \
         "            - secretRef:" \
-        "                name: fastapi-app-secrets" \
+        "                name: fastapi-app-ssm" \
         > /tmp/migrate-job.yaml
       kubectl -n "${K8S_NAMESPACE}" apply -f /tmp/migrate-job.yaml
       if ! kubectl -n "${K8S_NAMESPACE}" wait --for=condition=complete "job/${JOB}" --timeout=300s; then
