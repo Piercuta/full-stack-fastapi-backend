@@ -52,8 +52,8 @@ def _to_public(job: MediaJob) -> MediaJobPublic:
 def _variant_url(original_url: str, original_s3_key: str, variant_key: str) -> str:
     """Rebuild a public URL for a variant S3 key.
 
-    file-service builds URLs as https://{CLOUDFRONT_DOMAIN}/{s3_key} where
-    CLOUDFRONT_DOMAIN may already include a path prefix (e.g. host/media).
+    file-service builds URLs as https://{CLOUDFRONT_DOMAIN}/{s3_key}
+    (e.g. https://files-test-k8s.dev.piercuta.com/media/<id>).
     """
     key = original_s3_key.lstrip("/")
     if key and original_url.endswith(key):
