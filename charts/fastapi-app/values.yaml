@@ -51,6 +51,9 @@ externalSecrets:
   enabled: false
   ssmPrefix: ""
   refreshInterval: 1h
+  secretStore:
+    serviceAccountName: external-secrets
+    serviceAccountNamespace: external-secrets
 
 # Populated by CI from K8S_SECRETS_ENV (FIRST_SUPERUSER_PASSWORD, SECRET_KEY).
 # With externalSecrets.enabled=false, CI also injects AWS_SECRET_ARN + COGNITO_* via config.
