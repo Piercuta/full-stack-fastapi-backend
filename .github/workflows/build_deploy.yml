@@ -63,7 +63,10 @@ jobs:
       ecr_uri: ${{ steps.ssm.outputs.ecr_uri }}
       postgres_server: ${{ steps.ssm.outputs.postgres_server }}
       frontend_host: ${{ steps.ssm.outputs.frontend_host }}
-      aws_secret_arn_ssm_param: ${{ steps.ssm.outputs.aws_secret_arn_ssm_param }}
+      aws_secret_arn: ${{ steps.ssm.outputs.aws_secret_arn }}
+      cognito_client_id: ${{ steps.ssm.outputs.cognito_client_id }}
+      cognito_issuer: ${{ steps.ssm.outputs.cognito_issuer }}
+      cognito_domain: ${{ steps.ssm.outputs.cognito_domain }}
       irsa_role_arn: ${{ steps.ssm.outputs.irsa_role_arn }}
       media_queue_url: ${{ steps.ssm.outputs.media_queue_url }}
       # Prod tags: use git tag (v1.2.3) in GitOps; otherwise commit SHA
@@ -109,10 +112,10 @@ jobs:
           ECR_URI=$(ssm_get ecr_api)
           POSTGRES_SERVER=$(ssm_get aurora_cluster_endpoint)
           FRONTEND_HOST=$(ssm_get site_url)
-          AWS_SECRET_ARN_SSM_PARAM="${SSM_PREFIX}/aurora_master_user_secret_arn"
-          COGNITO_CLIENT_ID_SSM_PARAM="${SSM_PREFIX}/cognito_client_id"
-          COGNITO_ISSUER_SSM_PARAM="${SSM_PREFIX}/cognito_issuer"
-          COGNITO_DOMAIN_SSM_PARAM="${SSM_PREFIX}/cognito_domain"
+          AWS_SECRET_ARN=$(ssm_get aurora_master_user_secret_arn)
+          COGNITO_CLIENT_ID=$(ssm_get cognito_client_id)
+          COGNITO_ISSUER=$(ssm_get cognito_issuer)
+          COGNITO_DOMAIN=$(ssm_get cognito_domain)
           IRSA_ROLE_ARN=$(ssm_get api_irsa_role_arn)
           MEDIA_QUEUE_URL=$(aws ssm get-parameter --name "${SSM_PREFIX}/media_queue_url" --query Parameter.Value --output text 2>/dev/null || true)
           if [ "$MEDIA_QUEUE_URL" = "None" ]; then MEDIA_QUEUE_URL=; fi
@@ -121,7 +124,10 @@ jobs:
           echo "ecr_uri=${ECR_URI}" >> "$GITHUB_OUTPUT"
           echo "postgres_server=${POSTGRES_SERVER}" >> "$GITHUB_OUTPUT"
           echo "frontend_host=${FRONTEND_HOST}" >> "$GITHUB_OUTPUT"
-          echo "aws_secret_arn_ssm_param=${AWS_SECRET_ARN_SSM_PARAM}" >> "$GITHUB_OUTPUT"
+          echo "aws_secret_arn=${AWS_SECRET_ARN}" >> "$GITHUB_OUTPUT"
+          echo "cognito_client_id=${COGNITO_CLIENT_ID}" >> "$GITHUB_OUTPUT"
+          echo "cognito_issuer=${COGNITO_ISSUER}" >> "$GITHUB_OUTPUT"
+          echo "cognito_domain=${COGNITO_DOMAIN}" >> "$GITHUB_OUTPUT"
           echo "irsa_role_arn=${IRSA_ROLE_ARN}" >> "$GITHUB_OUTPUT"
           echo "media_queue_url=${MEDIA_QUEUE_URL}" >> "$GITHUB_OUTPUT"
           echo "Cluster=${CLUSTER} ECR=${ECR_URI}"
@@ -309,7 +315,10 @@ jobs:
         env:
           POSTGRES_SERVER: ${{ needs.build.outputs.postgres_server }}
           FRONTEND_HOST: ${{ needs.build.outputs.frontend_host }}
-          AWS_SECRET_ARN_SSM_PARAM: ${{ needs.build.outputs.aws_secret_arn_ssm_param }}
+          AWS_SECRET_ARN: ${{ needs.build.outputs.aws_secret_arn }}
+          COGNITO_CLIENT_ID: ${{ needs.build.outputs.cognito_client_id }}
+          COGNITO_ISSUER: ${{ needs.build.outputs.cognito_issuer }}
+          COGNITO_DOMAIN: ${{ needs.build.outputs.cognito_domain }}
           IRSA_ROLE_ARN: ${{ needs.build.outputs.irsa_role_arn }}
           MEDIA_QUEUE_URL: ${{ needs.build.outputs.media_queue_url }}
           ECR_URI: ${{ needs.build.outputs.ecr_uri }}
@@ -318,9 +327,9 @@ jobs:
           (
             cd "k8s/overlays/${OVERLAY}"
             cp /tmp/secrets.env secrets.env
-            printf 'POSTGRES_SERVER=%s\nFRONTEND_HOST=%s\nAWS_SECRET_ARN_SSM_PARAM=%s\nMEDIA_QUEUE_URL=%s\nCOGNITO_CLIENT_ID_SSM_PARAM=%s\nCOGNITO_ISSUER_SSM_PARAM=%s\nCOGNITO_DOMAIN_SSM_PARAM=%s\n' \
-              "$POSTGRES_SERVER" "$FRONTEND_HOST" "$AWS_SECRET_ARN_SSM_PARAM" "$MEDIA_QUEUE_URL" \
-              "${SSM_PREFIX}/cognito_client_id" "${SSM_PREFIX}/cognito_issuer" "${SSM_PREFIX}/cognito_domain" \
+            printf 'POSTGRES_SERVER=%s\nFRONTEND_HOST=%s\nAWS_SECRET_ARN=%s\nMEDIA_QUEUE_URL=%s\nCOGNITO_CLIENT_ID=%s\nCOGNITO_ISSUER=%s\nCOGNITO_DOMAIN=%s\n' \
+              "$POSTGRES_SERVER" "$FRONTEND_HOST" "$AWS_SECRET_ARN" "$MEDIA_QUEUE_URL" \
+              "$COGNITO_CLIENT_ID" "$COGNITO_ISSUER" "$COGNITO_DOMAIN" \
               > generated-config.env
             printf '%s\n' \
               'apiVersion: v1' \
@@ -340,7 +349,10 @@ jobs:
         env:
           POSTGRES_SERVER: ${{ needs.build.outputs.postgres_server }}
           FRONTEND_HOST: ${{ needs.build.outputs.frontend_host }}
-          AWS_SECRET_ARN_SSM_PARAM: ${{ needs.build.outputs.aws_secret_arn_ssm_param }}
+          AWS_SECRET_ARN: ${{ needs.build.outputs.aws_secret_arn }}
+          COGNITO_CLIENT_ID: ${{ needs.build.outputs.cognito_client_id }}
+          COGNITO_ISSUER: ${{ needs.build.outputs.cognito_issuer }}
+          COGNITO_DOMAIN: ${{ needs.build.outputs.cognito_domain }}
           IRSA_ROLE_ARN: ${{ needs.build.outputs.irsa_role_arn }}
           MEDIA_QUEUE_URL: ${{ needs.build.outputs.media_queue_url }}
           ECR_URI: ${{ needs.build.outputs.ecr_uri }}
@@ -368,11 +380,11 @@ jobs:
               "  ENVIRONMENT: \"${DEPLOY_ENV}\"" \
               "  POSTGRES_SERVER: \"${POSTGRES_SERVER}\"" \
               "  FRONTEND_HOST: \"${FRONTEND_HOST}\"" \
-              "  AWS_SECRET_ARN_SSM_PARAM: \"${AWS_SECRET_ARN_SSM_PARAM}\"" \
+              "  AWS_SECRET_ARN: \"${AWS_SECRET_ARN}\"" \
+              "  COGNITO_CLIENT_ID: \"${COGNITO_CLIENT_ID}\"" \
+              "  COGNITO_ISSUER: \"${COGNITO_ISSUER}\"" \
+              "  COGNITO_DOMAIN: \"${COGNITO_DOMAIN}\"" \
               "  MEDIA_QUEUE_URL: \"${MEDIA_QUEUE_URL}\"" \
-              "  COGNITO_CLIENT_ID_SSM_PARAM: \"${SSM_PREFIX}/cognito_client_id\"" \
-              "  COGNITO_ISSUER_SSM_PARAM: \"${SSM_PREFIX}/cognito_issuer\"" \
-              "  COGNITO_DOMAIN_SSM_PARAM: \"${SSM_PREFIX}/cognito_domain\"" \
               "secrets:"
             while IFS= read -r line || [ -n "$line" ]; do
               case "$line" in ''|\#*) continue ;; esac

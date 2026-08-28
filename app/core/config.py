@@ -59,50 +59,25 @@ class Settings(BaseSettings):
     POSTGRES_USER: str
     POSTGRES_PASSWORD: str = ""
     POSTGRES_DB: str = ""
-    # Prefer AWS_SECRET_ARN_SSM_PARAM (stable path); AWS_SECRET_ARN remains as override/fallback.
+    # Injected by External Secrets (Secrets Manager ARN for RDS master user).
     AWS_SECRET_ARN: str | None = None
-    AWS_SECRET_ARN_SSM_PARAM: str | None = None
     AWS_REGION: str = "eu-west-1"
     MEDIA_QUEUE_URL: str | None = None
     MEDIA_WORKER_SECRET: str | None = None
 
-    # Cognito OIDC (optional). Prefer *_SSM_PARAM paths; direct values override SSM.
+    # Cognito OIDC (optional). Injected by External Secrets on EKS; set directly for local dev.
     COGNITO_CLIENT_ID: str | None = None
-    COGNITO_CLIENT_ID_SSM_PARAM: str | None = None
     COGNITO_CLIENT_SECRET: str | None = None
     COGNITO_DOMAIN: str | None = None
-    COGNITO_DOMAIN_SSM_PARAM: str | None = None
     COGNITO_ISSUER: str | None = None
-    COGNITO_ISSUER_SSM_PARAM: str | None = None
 
     # File Service Configuration
     FILE_SERVICE_URL: str = "http://file-service-svc.file-service.svc.cluster.local"
     MAX_AVATAR_SIZE: int = 5 * 1024 * 1024  # 5MB
     ALLOWED_AVATAR_TYPES: list[str] = ["image/jpeg", "image/png", "image/gif", "image/webp"]
 
-    def _get_ssm_parameter(self, param_name: str) -> str:
-        session = boto3.session.Session()
-        ssm = session.client("ssm", region_name=self.AWS_REGION)
-        response = ssm.get_parameter(Name=param_name)
-        value = (response.get("Parameter") or {}).get("Value") or ""
-        if not value:
-            raise ValueError(f"SSM parameter {param_name} is empty")
-        return value
-
-    def _resolve_secret_arn(self) -> str | None:
-        """Resolve Secrets Manager ARN from SSM, or use AWS_SECRET_ARN directly."""
-        if self.AWS_SECRET_ARN_SSM_PARAM:
-            return self._get_ssm_parameter(self.AWS_SECRET_ARN_SSM_PARAM)
-        return self.AWS_SECRET_ARN
-
     def _get_secret(self) -> str:
-        try:
-            secret_id = self._resolve_secret_arn()
-        except Exception as e:
-            print(f"[ERROR] Failed to resolve secret ARN: {e}")
-            return self.POSTGRES_PASSWORD
-
-        if not secret_id:
+        if not self.AWS_SECRET_ARN:
             return self.POSTGRES_PASSWORD
 
         try:
@@ -111,7 +86,7 @@ class Settings(BaseSettings):
                 service_name="secretsmanager",
                 region_name=self.AWS_REGION,
             )
-            response = client.get_secret_value(SecretId=secret_id)
+            response = client.get_secret_value(SecretId=self.AWS_SECRET_ARN)
             secret = json.loads(response["SecretString"])
             return secret.get("password", self.POSTGRES_PASSWORD)
         except Exception as e:
@@ -169,32 +144,9 @@ class Settings(BaseSettings):
                 raise ValueError(message)
 
     @model_validator(mode="after")
-    def _resolve_cognito_from_ssm(self) -> Self:
-        """Load Cognito settings from SSM when only param paths are configured."""
-        for field, param_field in (
-            ("COGNITO_CLIENT_ID", "COGNITO_CLIENT_ID_SSM_PARAM"),
-            ("COGNITO_ISSUER", "COGNITO_ISSUER_SSM_PARAM"),
-            ("COGNITO_DOMAIN", "COGNITO_DOMAIN_SSM_PARAM"),
-        ):
-            if getattr(self, field):
-                continue
-            param_path = getattr(self, param_field)
-            if not param_path:
-                continue
-            try:
-                setattr(self, field, self._get_ssm_parameter(param_path))
-            except Exception as exc:
-                message = f"Failed to resolve {param_field} ({param_path}): {exc}"
-                if self.ENVIRONMENT == "local":
-                    warnings.warn(message, stacklevel=1)
-                else:
-                    raise ValueError(message) from exc
-        return self
-
-    @model_validator(mode="after")
     def _enforce_non_default_secrets(self) -> Self:
         self._check_default_secret("SECRET_KEY", self.SECRET_KEY)
-        if not self.AWS_SECRET_ARN and not self.AWS_SECRET_ARN_SSM_PARAM:
+        if not self.AWS_SECRET_ARN:
             self._check_default_secret("POSTGRES_PASSWORD", self.POSTGRES_PASSWORD)
         self._check_default_secret(
             "FIRST_SUPERUSER_PASSWORD", self.FIRST_SUPERUSER_PASSWORD

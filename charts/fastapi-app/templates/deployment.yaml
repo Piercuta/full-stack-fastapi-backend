@@ -28,6 +28,10 @@ spec:
                 name: {{ include "fastapi-app.fullname" . }}-config
             - secretRef:
                 name: {{ include "fastapi-app.fullname" . }}-secrets
+            {{- if .Values.externalSecrets.enabled }}
+            - secretRef:
+                name: {{ include "fastapi-app.fullname" . }}-ssm
+            {{- end }}
           readinessProbe:
             httpGet:
               path: /api/v1/utils/health-check/

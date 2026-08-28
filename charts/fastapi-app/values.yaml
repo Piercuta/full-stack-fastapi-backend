@@ -43,16 +43,15 @@ config:
   FIRST_SUPERUSER: admin@example.com
   POSTGRES_SERVER: ""
   FRONTEND_HOST: ""
-  AWS_SECRET_ARN: ""
-  AWS_SECRET_ARN_SSM_PARAM: ""
   MEDIA_QUEUE_URL: ""
   MEDIA_WORKER_SECRET: ""
-  COGNITO_CLIENT_ID: ""
-  COGNITO_CLIENT_ID_SSM_PARAM: ""
-  COGNITO_DOMAIN: ""
-  COGNITO_DOMAIN_SSM_PARAM: ""
-  COGNITO_ISSUER: ""
-  COGNITO_ISSUER_SSM_PARAM: ""
 
-# Populated by CI from K8S_SECRETS_ENV (FIRST_SUPERUSER_PASSWORD, SECRET_KEY)
+# SSM → K8s Secret via External Secrets Operator (GitOps / Helm on EKS).
+externalSecrets:
+  enabled: false
+  ssmPrefix: ""
+  refreshInterval: 1h
+
+# Populated by CI from K8S_SECRETS_ENV (FIRST_SUPERUSER_PASSWORD, SECRET_KEY).
+# With externalSecrets.enabled=false, CI also injects AWS_SECRET_ARN + COGNITO_* via config.
 secrets: {}
