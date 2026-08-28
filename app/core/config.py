@@ -66,29 +66,33 @@ class Settings(BaseSettings):
     MEDIA_QUEUE_URL: str | None = None
     MEDIA_WORKER_SECRET: str | None = None
 
-    # Cognito OIDC (optional). Domain may be a full Hosted UI URL or the prefix only.
+    # Cognito OIDC (optional). Prefer *_SSM_PARAM paths; direct values override SSM.
     COGNITO_CLIENT_ID: str | None = None
+    COGNITO_CLIENT_ID_SSM_PARAM: str | None = None
     COGNITO_CLIENT_SECRET: str | None = None
     COGNITO_DOMAIN: str | None = None
+    COGNITO_DOMAIN_SSM_PARAM: str | None = None
     COGNITO_ISSUER: str | None = None
+    COGNITO_ISSUER_SSM_PARAM: str | None = None
 
     # File Service Configuration
     FILE_SERVICE_URL: str = "http://file-service-svc.file-service.svc.cluster.local"
     MAX_AVATAR_SIZE: int = 5 * 1024 * 1024  # 5MB
     ALLOWED_AVATAR_TYPES: list[str] = ["image/jpeg", "image/png", "image/gif", "image/webp"]
 
+    def _get_ssm_parameter(self, param_name: str) -> str:
+        session = boto3.session.Session()
+        ssm = session.client("ssm", region_name=self.AWS_REGION)
+        response = ssm.get_parameter(Name=param_name)
+        value = (response.get("Parameter") or {}).get("Value") or ""
+        if not value:
+            raise ValueError(f"SSM parameter {param_name} is empty")
+        return value
+
     def _resolve_secret_arn(self) -> str | None:
         """Resolve Secrets Manager ARN from SSM, or use AWS_SECRET_ARN directly."""
         if self.AWS_SECRET_ARN_SSM_PARAM:
-            session = boto3.session.Session()
-            ssm = session.client("ssm", region_name=self.AWS_REGION)
-            response = ssm.get_parameter(Name=self.AWS_SECRET_ARN_SSM_PARAM)
-            arn = (response.get("Parameter") or {}).get("Value") or ""
-            if not arn:
-                raise ValueError(
-                    f"SSM parameter {self.AWS_SECRET_ARN_SSM_PARAM} is empty"
-                )
-            return arn
+            return self._get_ssm_parameter(self.AWS_SECRET_ARN_SSM_PARAM)
         return self.AWS_SECRET_ARN
 
     def _get_secret(self) -> str:
@@ -163,6 +167,29 @@ class Settings(BaseSettings):
                 warnings.warn(message, stacklevel=1)
             else:
                 raise ValueError(message)
+
+    @model_validator(mode="after")
+    def _resolve_cognito_from_ssm(self) -> Self:
+        """Load Cognito settings from SSM when only param paths are configured."""
+        for field, param_field in (
+            ("COGNITO_CLIENT_ID", "COGNITO_CLIENT_ID_SSM_PARAM"),
+            ("COGNITO_ISSUER", "COGNITO_ISSUER_SSM_PARAM"),
+            ("COGNITO_DOMAIN", "COGNITO_DOMAIN_SSM_PARAM"),
+        ):
+            if getattr(self, field):
+                continue
+            param_path = getattr(self, param_field)
+            if not param_path:
+                continue
+            try:
+                setattr(self, field, self._get_ssm_parameter(param_path))
+            except Exception as exc:
+                message = f"Failed to resolve {param_field} ({param_path}): {exc}"
+                if self.ENVIRONMENT == "local":
+                    warnings.warn(message, stacklevel=1)
+                else:
+                    raise ValueError(message) from exc
+        return self
 
     @model_validator(mode="after")
     def _enforce_non_default_secrets(self) -> Self:

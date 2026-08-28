@@ -82,6 +82,9 @@ build:
       POSTGRES_SERVER=$(ssm_get aurora_cluster_endpoint)
       FRONTEND_HOST=$(ssm_get site_url)
       AWS_SECRET_ARN_SSM_PARAM="${SSM_PREFIX}/aurora_master_user_secret_arn"
+      COGNITO_CLIENT_ID_SSM_PARAM="${SSM_PREFIX}/cognito_client_id"
+      COGNITO_ISSUER_SSM_PARAM="${SSM_PREFIX}/cognito_issuer"
+      COGNITO_DOMAIN_SSM_PARAM="${SSM_PREFIX}/cognito_domain"
       IRSA_ROLE_ARN=$(ssm_get api_irsa_role_arn)
       MEDIA_QUEUE_URL=$(aws ssm get-parameter --name "${SSM_PREFIX}/media_queue_url" --query Parameter.Value --output text 2>/dev/null || true)
       if [ "$MEDIA_QUEUE_URL" = "None" ]; then MEDIA_QUEUE_URL=; fi
@@ -239,6 +242,9 @@ deploy:
             "  FRONTEND_HOST: \"${FRONTEND_HOST}\"" \
             "  AWS_SECRET_ARN_SSM_PARAM: \"${AWS_SECRET_ARN_SSM_PARAM}\"" \
             "  MEDIA_QUEUE_URL: \"${MEDIA_QUEUE_URL}\"" \
+            "  COGNITO_CLIENT_ID_SSM_PARAM: \"${COGNITO_CLIENT_ID_SSM_PARAM}\"" \
+            "  COGNITO_ISSUER_SSM_PARAM: \"${COGNITO_ISSUER_SSM_PARAM}\"" \
+            "  COGNITO_DOMAIN_SSM_PARAM: \"${COGNITO_DOMAIN_SSM_PARAM}\"" \
             "secrets:"
           while IFS= read -r line || [ -n "$line" ]; do
             case "$line" in ''|\#*) continue ;; esac
@@ -255,8 +261,10 @@ deploy:
         (
           cd "k8s/overlays/${OVERLAY}"
           cp /tmp/secrets.env secrets.env
-          printf 'POSTGRES_SERVER=%s\nFRONTEND_HOST=%s\nAWS_SECRET_ARN_SSM_PARAM=%s\nMEDIA_QUEUE_URL=%s\n' \
-            "$POSTGRES_SERVER" "$FRONTEND_HOST" "$AWS_SECRET_ARN_SSM_PARAM" "$MEDIA_QUEUE_URL" > generated-config.env
+          printf 'POSTGRES_SERVER=%s\nFRONTEND_HOST=%s\nAWS_SECRET_ARN_SSM_PARAM=%s\nMEDIA_QUEUE_URL=%s\nCOGNITO_CLIENT_ID_SSM_PARAM=%s\nCOGNITO_ISSUER_SSM_PARAM=%s\nCOGNITO_DOMAIN_SSM_PARAM=%s\n' \
+            "$POSTGRES_SERVER" "$FRONTEND_HOST" "$AWS_SECRET_ARN_SSM_PARAM" "$MEDIA_QUEUE_URL" \
+            "$COGNITO_CLIENT_ID_SSM_PARAM" "$COGNITO_ISSUER_SSM_PARAM" "$COGNITO_DOMAIN_SSM_PARAM" \
+            > generated-config.env
           printf '%s\n' \
             'apiVersion: v1' \
             'kind: ServiceAccount' \
