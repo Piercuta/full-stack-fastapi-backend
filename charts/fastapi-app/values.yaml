@@ -51,6 +51,7 @@ externalSecrets:
   enabled: false
   ssmPrefix: ""
   refreshInterval: 1h
+  clusterSecretStoreName: test-k8s-ssm
   secretStore:
     serviceAccountName: external-secrets
     serviceAccountNamespace: external-secrets
