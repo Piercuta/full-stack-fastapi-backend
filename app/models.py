@@ -160,6 +160,17 @@ class DashboardStats(SQLModel):
     series: list[DashboardSeriesPoint]
 
 
+class DashboardCacheInfo(SQLModel):
+    """Redis cache introspection for the dashboard stats key (superuser)."""
+
+    enabled: bool
+    redis_reachable: bool
+    key: str
+    ttl_seconds: int | None = None
+    configured_ttl_seconds: int
+    payload: DashboardStats | None = None
+
+
 class MediaJobStatus(str, Enum):
     queued = "queued"
     processing = "processing"

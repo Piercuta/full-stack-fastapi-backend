@@ -62,3 +62,41 @@ def cache_set(key: str, value: str, ttl_seconds: int) -> None:
         client.setex(key, ttl_seconds, value)
     except Exception as exc:
         logger.warning("Redis SETEX %s failed: %s", key, exc)
+
+
+def cache_ttl(key: str) -> int | None:
+    """Return remaining TTL in seconds, or None if key missing / Redis off.
+
+    Redis TTL: -2 key does not exist, -1 key exists with no expire.
+    """
+    client = get_redis()
+    if client is None:
+        return None
+    try:
+        ttl = int(client.ttl(key))
+        if ttl < 0:
+            return None
+        return ttl
+    except Exception as exc:
+        logger.warning("Redis TTL %s failed: %s", key, exc)
+        return None
+
+
+def cache_delete(key: str) -> bool:
+    """Delete a cache key. Returns True if a key was removed."""
+    client = get_redis()
+    if client is None:
+        return False
+    try:
+        return bool(client.delete(key))
+    except Exception as exc:
+        logger.warning("Redis DEL %s failed: %s", key, exc)
+        return False
+
+
+def redis_configured() -> bool:
+    return bool(settings.REDIS_URL)
+
+
+def redis_reachable() -> bool:
+    return get_redis() is not None

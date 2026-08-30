@@ -4,17 +4,34 @@ from __future__ import annotations
 
 import logging
 from datetime import date, datetime, timedelta, timezone
+from typing import Any
 
 import boto3
 import httpx
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
 from sqlalchemy import Date, cast, func
 from sqlmodel import select
 
-from app.api.deps import CurrentUser, SessionDep
-from app.core.cache import cache_get, cache_set
+from app.api.deps import CurrentUser, SessionDep, get_current_active_superuser
+from app.core.cache import (
+    cache_delete,
+    cache_get,
+    cache_set,
+    cache_ttl,
+    redis_configured,
+    redis_reachable,
+)
 from app.core.config import settings
-from app.models import DashboardSeriesPoint, DashboardStats, Item, MediaJob, MediaJobStatus, User
+from app.models import (
+    DashboardCacheInfo,
+    DashboardSeriesPoint,
+    DashboardStats,
+    Item,
+    MediaJob,
+    MediaJobStatus,
+    Message,
+    User,
+)
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/dashboard", tags=["dashboard"])
@@ -137,3 +154,47 @@ def read_dashboard_stats(
         settings.DASHBOARD_CACHE_TTL_SECONDS,
     )
     return stats
+
+
+@router.get(
+    "/cache",
+    response_model=DashboardCacheInfo,
+    dependencies=[Depends(get_current_active_superuser)],
+)
+def read_dashboard_cache() -> DashboardCacheInfo:
+    """Inspect the Redis entry for dashboard stats (superuser only)."""
+    enabled = redis_configured()
+    reachable = redis_reachable() if enabled else False
+    payload: DashboardStats | None = None
+    ttl: int | None = None
+
+    if reachable:
+        raw = cache_get(DASHBOARD_CACHE_KEY)
+        ttl = cache_ttl(DASHBOARD_CACHE_KEY)
+        if raw:
+            try:
+                payload = DashboardStats.model_validate_json(raw)
+            except Exception as exc:
+                logger.warning("Invalid dashboard cache payload: %s", exc)
+
+    return DashboardCacheInfo(
+        enabled=enabled,
+        redis_reachable=reachable,
+        key=DASHBOARD_CACHE_KEY,
+        ttl_seconds=ttl,
+        configured_ttl_seconds=settings.DASHBOARD_CACHE_TTL_SECONDS,
+        payload=payload,
+    )
+
+
+@router.delete(
+    "/cache",
+    response_model=Message,
+    dependencies=[Depends(get_current_active_superuser)],
+)
+def invalidate_dashboard_cache() -> Any:
+    """Delete the dashboard stats cache key (superuser only)."""
+    deleted = cache_delete(DASHBOARD_CACHE_KEY)
+    if deleted:
+        return Message(message="Dashboard cache invalidated")
+    return Message(message="Dashboard cache key was already absent or Redis is off")
