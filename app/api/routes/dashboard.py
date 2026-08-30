@@ -12,11 +12,14 @@ from sqlalchemy import Date, cast, func
 from sqlmodel import select
 
 from app.api.deps import CurrentUser, SessionDep
+from app.core.cache import cache_get, cache_set
 from app.core.config import settings
 from app.models import DashboardSeriesPoint, DashboardStats, Item, MediaJob, MediaJobStatus, User
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/dashboard", tags=["dashboard"])
+
+DASHBOARD_CACHE_KEY = f"dashboard:stats:{settings.ENVIRONMENT}"
 
 
 def _sqs_queue_depth() -> tuple[int, int]:
@@ -53,19 +56,7 @@ def _file_service_healthy() -> bool:
         return False
 
 
-@router.get("/stats", response_model=DashboardStats)
-def read_dashboard_stats(
-    session: SessionDep,
-    current_user: CurrentUser,
-) -> DashboardStats:
-    """
-    Aggregate stats for the home dashboard.
-    Chart series = items created per day (last 7 days UTC).
-    Avatars = users with avatar_url set.
-    Jobs pending/failed = MediaJob rows (queued/processing vs failed).
-    """
-    _ = current_user
-
+def _compute_dashboard_stats(session: SessionDep) -> DashboardStats:
     users = session.exec(select(func.count()).select_from(User)).one()
     items = session.exec(select(func.count()).select_from(Item)).one()
     avatars = session.exec(
@@ -115,3 +106,34 @@ def read_dashboard_stats(
         api_healthy=api_healthy,
         series=series,
     )
+
+
+@router.get("/stats", response_model=DashboardStats)
+def read_dashboard_stats(
+    session: SessionDep,
+    current_user: CurrentUser,
+) -> DashboardStats:
+    """
+    Aggregate stats for the home dashboard.
+    Chart series = items created per day (last 7 days UTC).
+    Avatars = users with avatar_url set.
+    Jobs pending/failed = MediaJob rows (queued/processing vs failed).
+
+    When REDIS_URL is set, results are cached (TTL = DASHBOARD_CACHE_TTL_SECONDS).
+    """
+    _ = current_user
+
+    cached = cache_get(DASHBOARD_CACHE_KEY)
+    if cached:
+        try:
+            return DashboardStats.model_validate_json(cached)
+        except Exception as exc:
+            logger.warning("Invalid dashboard cache payload: %s", exc)
+
+    stats = _compute_dashboard_stats(session)
+    cache_set(
+        DASHBOARD_CACHE_KEY,
+        stats.model_dump_json(),
+        settings.DASHBOARD_CACHE_TTL_SECONDS,
+    )
+    return stats

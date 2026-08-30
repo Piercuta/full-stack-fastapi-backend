@@ -41,6 +41,7 @@ config:
   FILE_SERVICE_URL: http://file-service
   AWS_REGION: eu-west-1
   FIRST_SUPERUSER: admin@example.com
+  DASHBOARD_CACHE_TTL_SECONDS: "30"
 
 # SSM → K8s Secret via External Secrets Operator (GitOps / Helm on EKS).
 externalSecrets:

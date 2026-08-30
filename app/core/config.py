@@ -65,6 +65,10 @@ class Settings(BaseSettings):
     MEDIA_QUEUE_URL: str | None = None
     MEDIA_WORKER_SECRET: str | None = None
 
+    # Optional Redis (ElastiCache). When unset, dashboard hits RDS every request.
+    REDIS_URL: str | None = None
+    DASHBOARD_CACHE_TTL_SECONDS: int = 30
+
     # Cognito OIDC (optional). Injected by External Secrets on EKS; set directly for local dev.
     COGNITO_CLIENT_ID: str | None = None
     COGNITO_CLIENT_SECRET: str | None = None
