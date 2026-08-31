@@ -2,7 +2,7 @@ from collections.abc import Generator
 from typing import Annotated
 
 import jwt
-from fastapi import Depends, HTTPException, status
+from fastapi import Depends, HTTPException, Request, status
 from fastapi.security import OAuth2PasswordBearer
 from jwt.exceptions import InvalidTokenError
 from pydantic import ValidationError
@@ -14,7 +14,8 @@ from app.core.db import engine
 from app.models import TokenPayload, User
 
 reusable_oauth2 = OAuth2PasswordBearer(
-    tokenUrl=f"{settings.API_V1_STR}/login/access-token"
+    tokenUrl=f"{settings.API_V1_STR}/login/access-token",
+    auto_error=False,
 )
 
 
@@ -24,7 +25,26 @@ def get_db() -> Generator[Session, None, None]:
 
 
 SessionDep = Annotated[Session, Depends(get_db)]
-TokenDep = Annotated[str, Depends(reusable_oauth2)]
+
+
+def get_access_token(
+    request: Request,
+    bearer_token: Annotated[str | None, Depends(reusable_oauth2)],
+) -> str:
+    """Read JWT from HttpOnly cookie (browser) or Authorization header (API clients)."""
+    cookie_token = request.cookies.get(settings.AUTH_COOKIE_NAME)
+    if cookie_token:
+        return cookie_token
+    if bearer_token:
+        return bearer_token
+    raise HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Not authenticated",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
+
+
+TokenDep = Annotated[str, Depends(get_access_token)]
 
 
 def get_current_user(session: SessionDep, token: TokenDep) -> User:

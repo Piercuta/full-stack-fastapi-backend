@@ -41,6 +41,13 @@ class Settings(BaseSettings):
     FRONTEND_HOST: str = "http://localhost:5173"
     ENVIRONMENT: Literal["local", "dev", "staging", "prod"] = "local"
 
+    # HttpOnly cookie auth (browser). Bearer header still supported for API clients/tests.
+    AUTH_COOKIE_NAME: str = "access_token"
+    AUTH_COOKIE_PATH: str = "/"
+    COOKIE_SECURE: bool = True
+    COOKIE_SAMESITE: Literal["lax", "strict", "none"] = "lax"
+    COOKIE_DOMAIN: str | None = None
+
     BACKEND_CORS_ORIGINS: Annotated[
         list[AnyUrl] | str, BeforeValidator(parse_cors)
     ] = []
@@ -119,10 +126,28 @@ class Settings(BaseSettings):
     EMAILS_FROM_EMAIL: EmailStr | None = None
     EMAILS_FROM_NAME: EmailStr | None = None
 
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def cookie_domain(self) -> str | None:
+        """Shared registrable domain for API + front subdomains (e.g. .dev.piercuta.com)."""
+        if self.COOKIE_DOMAIN:
+            return self.COOKIE_DOMAIN
+        if self.ENVIRONMENT == "local":
+            return None
+        host = self.FRONTEND_HOST.replace("https://", "").replace("http://", "").split("/")[0]
+        parts = host.split(".")
+        if len(parts) >= 3:
+            return f".{'.'.join(parts[-3:])}"
+        if len(parts) == 2:
+            return f".{'.'.join(parts)}"
+        return None
+
     @model_validator(mode="after")
     def _set_default_emails_from(self) -> Self:
         if not self.EMAILS_FROM_NAME:
             self.EMAILS_FROM_NAME = self.PROJECT_NAME
+        if self.ENVIRONMENT == "local":
+            self.COOKIE_SECURE = False
         return self
 
     EMAIL_RESET_TOKEN_EXPIRE_HOURS: int = 48

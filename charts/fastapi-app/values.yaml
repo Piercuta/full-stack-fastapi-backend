@@ -42,6 +42,8 @@ config:
   AWS_REGION: eu-west-1
   FIRST_SUPERUSER: admin@example.com
   DASHBOARD_CACHE_TTL_SECONDS: "30"
+  # Optional override; when unset, derived from FRONTEND_HOST (e.g. .dev.piercuta.com).
+  # COOKIE_DOMAIN: ".dev.piercuta.com"
 
 # SSM → K8s Secret via External Secrets Operator (GitOps / Helm on EKS).
 externalSecrets:
