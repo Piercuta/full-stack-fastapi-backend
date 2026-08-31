@@ -15,6 +15,16 @@ spec:
     metadata:
       labels:
         {{- include "fastapi-app.labels" . | nindent 8 }}
+      annotations:
+        # FastAPI/Python only — skip Java/Node/.NET OTel init containers (faster pod startup).
+        instrumentation.opentelemetry.io/inject-python: "true"
+        instrumentation.opentelemetry.io/inject-java: "false"
+        instrumentation.opentelemetry.io/inject-nodejs: "false"
+        instrumentation.opentelemetry.io/inject-dotnet: "false"
+        cloudwatch.aws.amazon.com/auto-annotate-python: "true"
+        cloudwatch.aws.amazon.com/auto-annotate-java: "false"
+        cloudwatch.aws.amazon.com/auto-annotate-nodejs: "false"
+        cloudwatch.aws.amazon.com/auto-annotate-dotnet: "false"
     spec:
       serviceAccountName: {{ include "fastapi-app.serviceAccountName" . }}
       containers:
@@ -36,19 +46,26 @@ spec:
             - secretRef:
                 name: {{ include "fastapi-app.fullname" . }}-ssm
             {{- end }}
+          startupProbe:
+            httpGet:
+              path: /api/v1/utils/health-check/
+              port: http
+            periodSeconds: 5
+            failureThreshold: 24
+            timeoutSeconds: 3
           readinessProbe:
             httpGet:
               path: /api/v1/utils/health-check/
               port: http
             periodSeconds: 10
-            timeoutSeconds: 2
+            timeoutSeconds: 3
             failureThreshold: 3
           livenessProbe:
             httpGet:
               path: /api/v1/utils/health-check/
               port: http
             periodSeconds: 20
-            timeoutSeconds: 2
+            timeoutSeconds: 3
             failureThreshold: 3
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
