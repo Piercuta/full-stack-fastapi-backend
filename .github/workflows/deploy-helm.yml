@@ -1,3 +1,6 @@
+name: Deploy Helm (FastAPI)
+run-name: FastAPI · Helm · ${{ inputs.environment }} · ${{ inputs.image_tag }}
+
 # Deploy FastAPI directly to EKS with Helm (fallback / debug — bypasses GitOps).
 #
 # Actions → "Deploy Helm" → pick environment + image tag
@@ -8,8 +11,6 @@
 # Vars:
 #   AWS_ROLE_ARN
 #   AWS_REGION               defaults to eu-west-1
-
-name: Deploy Helm
 
 on:
   workflow_dispatch:

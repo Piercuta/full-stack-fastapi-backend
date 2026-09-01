@@ -1,5 +1,7 @@
-# Build the FastAPI image and push it to ECR.
-# On success, triggers deploy-gitops (Argo CD sync via GitOps repo bump).
+name: Build and deploy to EKS
+run-name: FastAPI · build & deploy · ${{ github.ref_name }}
+
+# Build the FastAPI image, push it to ECR, then trigger deploy-gitops.
 #
 # Triggers:
 #   push `dev`         → build + GitOps deploy (dev); ECR :sha + :dev
@@ -19,8 +21,6 @@
 #   AWS_REGION               defaults to eu-west-1
 #   GITOPS_REPO              defaults to git@github.com:Piercuta/full-stack-git-ops.git
 #   GITOPS_BRANCH            defaults to main
-
-name: Build
 
 on:
   push:

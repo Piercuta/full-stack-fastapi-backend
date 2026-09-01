@@ -1,3 +1,6 @@
+name: Deploy GitOps (FastAPI)
+run-name: FastAPI · GitOps bump · ${{ inputs.deploy_env || inputs.environment }} · ${{ inputs.image_tag }}
+
 # Bump image.tag in the GitOps repo → Argo CD syncs automatically.
 #
 # Called automatically after "Build" on dev / prod tags, or manually:
@@ -13,8 +16,6 @@
 # Vars:
 #   GITOPS_REPO              defaults to git@github.com:Piercuta/full-stack-git-ops.git
 #   GITOPS_BRANCH            defaults to main
-
-name: Deploy GitOps
 
 on:
   workflow_call:
