@@ -95,4 +95,4 @@ jobs:
           values_file: apps/fastapi-app/values-${{ env.DEPLOY_ENV }}.yaml
           ecr_uri: ${{ inputs.ecr_uri || steps.ssm.outputs.ecr_uri }}
           image_tag: ${{ env.IMAGE_TAG }}
-          commit_message: chore(fastapi-app): bump image to ${{ env.IMAGE_TAG }} (${{ env.DEPLOY_ENV }})
+          commit_message: "chore(fastapi-app): bump image to ${{ env.IMAGE_TAG }} (${{ env.DEPLOY_ENV }})"
