@@ -1,0 +1,134 @@
+# Build the FastAPI image and push it to ECR.
+# On success, triggers deploy-gitops (Argo CD sync via GitOps repo bump).
+#
+# Triggers:
+#   push `dev`         → build + GitOps deploy (dev); ECR :sha + :dev
+#   push tag on `prod` → build + GitOps deploy (prod); ECR :sha + :latest + :<git-tag>
+#   workflow_dispatch  → build + GitOps deploy (env from ref)
+#
+# Manual deploy fallbacks (no auto trigger):
+#   Actions → "Deploy Helm" / "Deploy Kustomize"
+#
+# Manual DB migrate: Actions → "Migrate database"
+#
+# Secrets:
+#   GITOPS_SSH_PRIVATE_KEY   required for deploy-gitops (called after build)
+#
+# Vars:
+#   AWS_ROLE_ARN
+#   AWS_REGION               defaults to eu-west-1
+#   GITOPS_REPO              defaults to git@github.com:Piercuta/full-stack-git-ops.git
+#   GITOPS_BRANCH            defaults to main
+
+name: Build
+
+on:
+  push:
+    branches:
+      - dev
+    tags:
+      - "*"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+  actions: write
+
+env:
+  K8S_NAMESPACE: test-k8s
+  DEPLOY_ENV: ${{ github.ref_name == 'dev' && 'dev' || 'prod' }}
+  SSM_PREFIX: ${{ github.ref_name == 'dev' && '/test-k8s/dev' || '/test-k8s/prod' }}
+  FLOATING_TAG: ${{ github.ref_name == 'dev' && 'dev' || 'latest' }}
+
+jobs:
+  build:
+    name: Build and push image
+    runs-on: ubuntu-latest
+    environment: ${{ github.ref_type == 'tag' && 'prod' || github.ref_name }}
+    outputs:
+      deploy_env: ${{ env.DEPLOY_ENV }}
+      ecr_uri: ${{ steps.ssm.outputs.ecr_uri }}
+      image_tag: ${{ steps.meta.outputs.image_tag }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Ensure tag is on prod branch
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          set -euo pipefail
+          git fetch origin prod:refs/remotes/origin/prod
+          if ! git merge-base --is-ancestor "${GITHUB_SHA}" origin/prod; then
+            echo "Refusing prod deploy: tag ${GITHUB_REF_NAME} (${GITHUB_SHA}) is not on branch prod." >&2
+            echo "Create the tag from prod, e.g.: git checkout prod && git tag v1.2.3 && git push origin v1.2.3" >&2
+            exit 1
+          fi
+          echo "Tag ${GITHUB_REF_NAME} is on origin/prod — OK for prod deploy."
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION || 'eu-west-1' }}
+
+      - name: Read SSM parameters
+        id: ssm
+        uses: ./.github/actions/read-fastapi-ssm
+        with:
+          ssm_prefix: ${{ env.SSM_PREFIX }}
+
+      - name: Resolve image tags
+        id: meta
+        env:
+          ECR_URI: ${{ steps.ssm.outputs.ecr_uri }}
+        run: |
+          set -euo pipefail
+          {
+            echo "${ECR_URI}:${GITHUB_SHA}"
+            echo "${ECR_URI}:${FLOATING_TAG}"
+          } > /tmp/ecr-tags.txt
+
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            echo "${ECR_URI}:${GITHUB_REF_NAME}" >> /tmp/ecr-tags.txt
+            echo "image_tag=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+            echo "Deploy image tag: ${GITHUB_REF_NAME}"
+          else
+            echo "image_tag=${GITHUB_SHA}" >> "$GITHUB_OUTPUT"
+            echo "Deploy image tag: ${GITHUB_SHA}"
+          fi
+
+          TAGS=$(paste -sd, /tmp/ecr-tags.txt)
+          echo "tags=${TAGS}" >> "$GITHUB_OUTPUT"
+          echo "ECR tags: ${TAGS}"
+
+      - name: Login to Amazon ECR
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build and push image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  deploy-gitops:
+    name: Deploy GitOps
+    needs: build
+    if: >
+      github.ref_name == 'dev' ||
+      startsWith(github.ref, 'refs/tags/') ||
+      github.event_name == 'workflow_dispatch'
+    uses: ./.github/workflows/deploy-gitops.yml
+    with:
+      deploy_env: ${{ needs.build.outputs.deploy_env }}
+      ecr_uri: ${{ needs.build.outputs.ecr_uri }}
+      image_tag: ${{ needs.build.outputs.image_tag }}
+    secrets: inherit

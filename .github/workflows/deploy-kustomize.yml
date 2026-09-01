@@ -1,0 +1,125 @@
+# Deploy FastAPI directly to EKS with Kustomize (legacy fallback — bypasses GitOps).
+#
+# Actions → "Deploy Kustomize" → pick environment + image tag
+#
+# Secrets:
+#   K8S_SECRETS_ENV          required on the target GitHub environment
+#
+# Vars:
+#   AWS_ROLE_ARN
+#   AWS_REGION               defaults to eu-west-1
+
+name: Deploy Kustomize
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: Target environment
+        required: true
+        type: choice
+        options:
+          - dev
+          - prod
+      image_tag:
+        description: ECR image tag (commit SHA or release tag)
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  K8S_NAMESPACE: test-k8s
+  DEPLOY_ENV: ${{ inputs.environment }}
+  SSM_PREFIX: /test-k8s/${{ inputs.environment }}
+  OVERLAY: ${{ inputs.environment }}
+  IMAGE_TAG: ${{ inputs.image_tag }}
+
+jobs:
+  deploy:
+    name: Kustomize apply
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment }}
+    concurrency:
+      group: deploy-kustomize-fastapi-${{ inputs.environment }}
+      cancel-in-progress: false
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION || 'eu-west-1' }}
+
+      - name: Read SSM parameters
+        id: ssm
+        uses: ./.github/actions/read-fastapi-ssm
+        with:
+          ssm_prefix: ${{ env.SSM_PREFIX }}
+
+      - name: Install kubectl
+        uses: azure/setup-kubectl@v4
+        with:
+          version: v1.32.3
+
+      - name: Install kustomize
+        run: |
+          curl -sL "https://github.com/kubernetes-sigs/kustomize/releases/download/kustomize%2Fv5.6.0/kustomize_v5.6.0_linux_amd64.tar.gz" | tar xz
+          sudo mv kustomize /usr/local/bin/kustomize
+          kustomize version
+
+      - name: Prepare secrets file
+        uses: ./.github/actions/prepare-k8s-secrets
+        with:
+          k8s_secrets_env: ${{ secrets.K8S_SECRETS_ENV }}
+          deploy_env: ${{ env.DEPLOY_ENV }}
+
+      - name: Update kubeconfig
+        run: aws eks update-kubeconfig --name "${{ steps.ssm.outputs.cluster }}" --region "${{ vars.AWS_REGION || 'eu-west-1' }}"
+
+      - name: Verify cluster access
+        run: |
+          echo "GitHub Actions IAM identity (this ARN needs an EKS access entry):"
+          aws sts get-caller-identity
+          if ! kubectl get namespace "${K8S_NAMESPACE}"; then
+            echo "EKS rejected these credentials. Add this IAM principal as an access entry on ${{ steps.ssm.outputs.cluster }} with AmazonEKSClusterAdminPolicy." >&2
+            exit 1
+          fi
+
+      - name: Deploy with Kustomize
+        env:
+          POSTGRES_SERVER: ${{ steps.ssm.outputs.postgres_server }}
+          FRONTEND_HOST: ${{ steps.ssm.outputs.frontend_host }}
+          AWS_SECRET_ARN: ${{ steps.ssm.outputs.aws_secret_arn }}
+          COGNITO_CLIENT_ID: ${{ steps.ssm.outputs.cognito_client_id }}
+          COGNITO_ISSUER: ${{ steps.ssm.outputs.cognito_issuer }}
+          COGNITO_DOMAIN: ${{ steps.ssm.outputs.cognito_domain }}
+          IRSA_ROLE_ARN: ${{ steps.ssm.outputs.irsa_role_arn }}
+          MEDIA_QUEUE_URL: ${{ steps.ssm.outputs.media_queue_url }}
+          ECR_URI: ${{ steps.ssm.outputs.ecr_uri }}
+        run: |
+          set -euo pipefail
+
+          (
+            cd "k8s/overlays/${OVERLAY}"
+            cp /tmp/secrets.env secrets.env
+            printf 'POSTGRES_SERVER=%s\nFRONTEND_HOST=%s\nAWS_SECRET_ARN=%s\nMEDIA_QUEUE_URL=%s\nCOGNITO_CLIENT_ID=%s\nCOGNITO_ISSUER=%s\nCOGNITO_DOMAIN=%s\n' \
+              "$POSTGRES_SERVER" "$FRONTEND_HOST" "$AWS_SECRET_ARN" "$MEDIA_QUEUE_URL" \
+              "$COGNITO_CLIENT_ID" "$COGNITO_ISSUER" "$COGNITO_DOMAIN" \
+              > generated-config.env
+            printf '%s\n' \
+              'apiVersion: v1' \
+              'kind: ServiceAccount' \
+              'metadata:' \
+              '  name: fastapi-app' \
+              '  annotations:' \
+              "    eks.amazonaws.com/role-arn: ${IRSA_ROLE_ARN}" \
+              > irsa-patch.yaml
+            kustomize edit set image "fastapi-app=${ECR_URI}:${IMAGE_TAG}"
+          )
+          kubectl apply -k "k8s/overlays/${OVERLAY}"
+          kubectl rollout status "deployment/fastapi-app" -n "${K8S_NAMESPACE}" --timeout=180s

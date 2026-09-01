@@ -1,0 +1,98 @@
+# Bump image.tag in the GitOps repo → Argo CD syncs automatically.
+#
+# Called automatically after "Build" on dev / prod tags, or manually:
+#   Actions → "Deploy GitOps" → pick environment + image tag
+#
+# GitOps paths:
+#   dev  → apps/fastapi-app/values-dev.yaml
+#   prod → apps/fastapi-app/values-prod.yaml
+#
+# Secrets:
+#   GITOPS_SSH_PRIVATE_KEY   SSH key with write access to the GitOps repo
+#
+# Vars:
+#   GITOPS_REPO              defaults to git@github.com:Piercuta/full-stack-git-ops.git
+#   GITOPS_BRANCH            defaults to main
+
+name: Deploy GitOps
+
+on:
+  workflow_call:
+    inputs:
+      deploy_env:
+        description: Target environment (dev or prod)
+        required: true
+        type: string
+      ecr_uri:
+        description: ECR repository URI
+        required: true
+        type: string
+      image_tag:
+        description: Image tag to deploy
+        required: true
+        type: string
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: Target environment
+        required: true
+        type: choice
+        options:
+          - dev
+          - prod
+      image_tag:
+        description: Image tag (ECR tag or commit SHA)
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+env:
+  GITOPS_REPO: ${{ vars.GITOPS_REPO || 'git@github.com:Piercuta/full-stack-git-ops.git' }}
+  GITOPS_BRANCH: ${{ vars.GITOPS_BRANCH || 'main' }}
+  DEPLOY_ENV: ${{ inputs.deploy_env || inputs.environment }}
+  ECR_URI: ${{ inputs.ecr_uri }}
+  IMAGE_TAG: ${{ inputs.image_tag }}
+  SSM_PREFIX: /test-k8s/${{ inputs.deploy_env || inputs.environment }}
+
+jobs:
+  deploy:
+    name: Bump GitOps image tag
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.deploy_env || inputs.environment }}
+    concurrency:
+      group: deploy-gitops-fastapi-${{ inputs.deploy_env || inputs.environment }}
+      cancel-in-progress: false
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        if: inputs.ecr_uri == ''
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION || 'eu-west-1' }}
+
+      - name: Read ECR URI from SSM
+        if: inputs.ecr_uri == ''
+        id: ssm
+        uses: ./.github/actions/read-fastapi-ssm
+        with:
+          ssm_prefix: ${{ env.SSM_PREFIX }}
+
+      - name: Setup GitOps SSH key
+        uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.GITOPS_SSH_PRIVATE_KEY }}
+
+      - name: Bump image tag
+        uses: ./.github/actions/bump-gitops-image
+        with:
+          gitops_repo: ${{ env.GITOPS_REPO }}
+          gitops_branch: ${{ env.GITOPS_BRANCH }}
+          values_file: apps/fastapi-app/values-${{ env.DEPLOY_ENV }}.yaml
+          ecr_uri: ${{ inputs.ecr_uri || steps.ssm.outputs.ecr_uri }}
+          image_tag: ${{ env.IMAGE_TAG }}
+          commit_message: chore(fastapi-app): bump image to ${{ env.IMAGE_TAG }} (${{ env.DEPLOY_ENV }})
