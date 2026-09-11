@@ -4,11 +4,8 @@
 # Actions → "Migrate database" → Run workflow → pick environment (dev|prod).
 #
 # Runs: bash scripts/prestart.sh in a one-shot pod using the same image,
-<<<<<<< HEAD
-# ServiceAccount, ConfigMap and Secret as the fastapi-app Deployment.
-=======
+
 # ServiceAccount, ConfigMap and ESO secret as the fastapi-app Deployment.
->>>>>>> dev
 
 name: Migrate database
 
