@@ -18,10 +18,13 @@ def get_redis() -> Any | None:
     global _client, _client_failed
 
     if not settings.REDIS_URL:
+        logger.info("Redis URL is not set, caching is disabled")
         return None
     if _client_failed:
+        logger.info("Redis client failed, caching is disabled")
         return None
     if _client is not None:
+        logger.info("Redis client is already initialized")
         return _client
 
     try:
