@@ -17,7 +17,7 @@ def get_redis() -> Any | None:
     """Return a Redis client, or None if caching is disabled / unavailable."""
     global _client, _client_failed
 
-    if not settings.REDIS_URL:
+    if not settings.REDIS_URL or settings.REDIS_URL == "disable":
         logger.info("Redis URL is not set, caching is disabled")
         return None
     if _client_failed:
