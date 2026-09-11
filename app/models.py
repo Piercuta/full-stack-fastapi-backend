@@ -1,4 +1,6 @@
 import uuid
+from datetime import datetime, timezone
+from enum import Enum
 
 from fastapi import UploadFile
 from pydantic import EmailStr
@@ -75,12 +77,17 @@ class ItemUpdate(ItemBase):
     title: str | None = Field(default=None, min_length=1, max_length=255)  # type: ignore
 
 
+def _utc_now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
 # Database model, database table inferred from class name
 class Item(ItemBase, table=True):
     id: uuid.UUID = Field(default_factory=uuid.uuid4, primary_key=True)
     owner_id: uuid.UUID = Field(
         foreign_key="user.id", nullable=False, ondelete="CASCADE"
     )
+    created_at: datetime = Field(default_factory=_utc_now, index=True)
     owner: User | None = Relationship(back_populates="items")
 
 
@@ -88,6 +95,7 @@ class Item(ItemBase, table=True):
 class ItemPublic(ItemBase):
     id: uuid.UUID
     owner_id: uuid.UUID
+    created_at: datetime | None = None
 
 
 class ItemsPublic(SQLModel):
@@ -104,6 +112,14 @@ class Message(SQLModel):
 class Token(SQLModel):
     access_token: str
     token_type: str = "bearer"
+
+
+class CognitoLogin(SQLModel):
+    """Authorization code from Cognito Hosted UI (flow B → app JWT)."""
+
+    code: str
+    redirect_uri: str
+    code_verifier: str | None = None
 
 
 # Contents of JWT token
@@ -127,3 +143,74 @@ class AvatarUpload(SQLModel):
 class AvatarResponse(SQLModel):
     avatar_url: str
     message: str = "Avatar uploaded successfully"
+
+
+class DashboardSeriesPoint(SQLModel):
+    date: str
+    items: int
+
+
+class DashboardStats(SQLModel):
+    users: int
+    items: int
+    avatars: int
+    jobs_pending: int
+    jobs_failed: int
+    api_healthy: bool
+    series: list[DashboardSeriesPoint]
+
+
+class DashboardCacheInfo(SQLModel):
+    """Redis cache introspection for the dashboard stats key (superuser)."""
+
+    enabled: bool
+    redis_reachable: bool
+    key: str
+    ttl_seconds: int | None = None
+    configured_ttl_seconds: int
+    payload: DashboardStats | None = None
+
+
+class MediaJobStatus(str, Enum):
+    queued = "queued"
+    processing = "processing"
+    done = "done"
+    failed = "failed"
+
+
+class MediaJob(SQLModel, table=True):
+    id: uuid.UUID = Field(default_factory=uuid.uuid4, primary_key=True)
+    owner_id: uuid.UUID = Field(
+        foreign_key="user.id", nullable=False, ondelete="CASCADE", index=True
+    )
+    status: MediaJobStatus = Field(default=MediaJobStatus.queued, index=True)
+    original_s3_key: str = Field(max_length=512)
+    original_url: str = Field(max_length=1024)
+    content_type: str | None = Field(default=None, max_length=128)
+    result_urls: str | None = Field(default=None)  # JSON list of variant URLs
+    error: str | None = Field(default=None, max_length=1024)
+    created_at: datetime = Field(default_factory=_utc_now, index=True)
+    updated_at: datetime = Field(default_factory=_utc_now)
+
+
+class MediaJobPublic(SQLModel):
+    id: uuid.UUID
+    status: MediaJobStatus
+    original_s3_key: str
+    original_url: str
+    content_type: str | None = None
+    result_urls: list[str] = []
+    error: str | None = None
+    created_at: datetime
+    updated_at: datetime
+
+
+class MediaJobsPublic(SQLModel):
+    data: list[MediaJobPublic]
+    count: int
+
+
+class MediaJobStatusUpdate(SQLModel):
+    status: MediaJobStatus
+    error: str | None = None
+    variant_keys: list[str] = []

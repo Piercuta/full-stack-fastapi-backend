@@ -1,0 +1,36 @@
+name: Prepare Kubernetes secrets env file
+description: Parse K8S_SECRETS_ENV into /tmp/secrets.env for Helm or Kustomize deploys.
+
+inputs:
+  k8s_secrets_env:
+    description: Raw secrets content (KEY=VALUE lines or JSON object)
+    required: true
+  deploy_env:
+    description: Target environment name (for error messages)
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Prepare secrets file
+      shell: bash
+      env:
+        K8S_SECRETS_ENV: ${{ inputs.k8s_secrets_env }}
+        DEPLOY_ENV: ${{ inputs.deploy_env }}
+      run: |
+        set -euo pipefail
+
+        if [ -z "${K8S_SECRETS_ENV:-}" ]; then
+          echo "Missing GitHub secret K8S_SECRETS_ENV on environment ${DEPLOY_ENV}" >&2
+          exit 1
+        fi
+        if [ -f "$K8S_SECRETS_ENV" ]; then
+          CONTENT=$(cat "$K8S_SECRETS_ENV")
+        else
+          CONTENT=$K8S_SECRETS_ENV
+        fi
+        if printf '%s' "$CONTENT" | jq -e 'type == "object"' >/dev/null 2>&1; then
+          printf '%s' "$CONTENT" | jq -r 'to_entries[] | "\(.key)=\(.value)"' > /tmp/secrets.env
+        else
+          printf '%s\n' "$CONTENT" > /tmp/secrets.env
+        fi

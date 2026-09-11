@@ -4,7 +4,7 @@ metadata:
   name: fastapi-app
 spec:
   rules:
-    - host: api.test-k8s.prod.piercuta.com
+    - host: api-test-k8s.prod.piercuta.com
       http:
         paths:
           - path: /

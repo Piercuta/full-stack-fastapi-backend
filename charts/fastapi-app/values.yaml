@@ -41,10 +41,19 @@ config:
   FILE_SERVICE_URL: http://file-service
   AWS_REGION: eu-west-1
   FIRST_SUPERUSER: admin@example.com
-  POSTGRES_SERVER: ""
-  FRONTEND_HOST: ""
-  AWS_SECRET_ARN: ""
-  MEDIA_QUEUE_URL: ""
+  DASHBOARD_CACHE_TTL_SECONDS: "30"
+  # Optional override; when unset, derived from FRONTEND_HOST (e.g. .dev.piercuta.com).
+  # COOKIE_DOMAIN: ".dev.piercuta.com"
 
-# Populated by CI from K8S_SECRETS_ENV (FIRST_SUPERUSER_PASSWORD, SECRET_KEY)
+# SSM → K8s Secret via External Secrets Operator (GitOps / Helm on EKS).
+externalSecrets:
+  enabled: false
+  ssmPrefix: ""
+  refreshInterval: 1h
+  clusterSecretStoreName: test-k8s-ssm
+  secretStore:
+    serviceAccountName: external-secrets
+    serviceAccountNamespace: external-secrets
+
+# Optional Helm-only secrets when ESO is disabled.
 secrets: {}

@@ -4,7 +4,6 @@ from typing import Annotated, Any, Literal
 from urllib.parse import quote_plus
 import json
 import boto3
-from botocore.exceptions import ClientError
 
 from pydantic import (
     AnyUrl,
@@ -42,6 +41,13 @@ class Settings(BaseSettings):
     FRONTEND_HOST: str = "http://localhost:5173"
     ENVIRONMENT: Literal["local", "dev", "staging", "prod"] = "local"
 
+    # HttpOnly cookie auth (browser). Bearer header still supported for API clients/tests.
+    AUTH_COOKIE_NAME: str = "access_token"
+    AUTH_COOKIE_PATH: str = "/"
+    COOKIE_SECURE: bool = True
+    COOKIE_SAMESITE: Literal["lax", "strict", "none"] = "lax"
+    COOKIE_DOMAIN: str | None = None
+
     BACKEND_CORS_ORIGINS: Annotated[
         list[AnyUrl] | str, BeforeValidator(parse_cors)
     ] = []
@@ -60,9 +66,21 @@ class Settings(BaseSettings):
     POSTGRES_USER: str
     POSTGRES_PASSWORD: str = ""
     POSTGRES_DB: str = ""
+    # Injected by External Secrets (Secrets Manager ARN for RDS master user).
     AWS_SECRET_ARN: str | None = None
     AWS_REGION: str = "eu-west-1"
     MEDIA_QUEUE_URL: str | None = None
+    MEDIA_WORKER_SECRET: str | None = None
+
+    # Optional Redis (ElastiCache). When unset, dashboard hits RDS every request.
+    REDIS_URL: str | None = None
+    DASHBOARD_CACHE_TTL_SECONDS: int = 30
+
+    # Cognito OIDC (optional). Injected by External Secrets on EKS; set directly for local dev.
+    COGNITO_CLIENT_ID: str | None = None
+    COGNITO_CLIENT_SECRET: str | None = None
+    COGNITO_DOMAIN: str | None = None
+    COGNITO_ISSUER: str | None = None
 
     # File Service Configuration
     FILE_SERVICE_URL: str = "http://file-service-svc.file-service.svc.cluster.local"
@@ -71,23 +89,19 @@ class Settings(BaseSettings):
 
     def _get_secret(self) -> str:
         if not self.AWS_SECRET_ARN:
-            print("[DEBUG] Pas de AWS_SECRET_ARN, fallback POSTGRES_PASSWORD")
             return self.POSTGRES_PASSWORD
 
         try:
-            print(f"[DEBUG] Tentative de lecture du secret: {self.AWS_SECRET_ARN}")
             session = boto3.session.Session()
             client = session.client(
-                service_name='secretsmanager',
-                region_name=self.AWS_REGION
+                service_name="secretsmanager",
+                region_name=self.AWS_REGION,
             )
             response = client.get_secret_value(SecretId=self.AWS_SECRET_ARN)
-            secret = json.loads(response['SecretString'])
-            print(f"[DEBUG] Secret récupéré: {secret}")
-            print(f"[PARFAIT] Secret récupéré: {secret}")
-            return secret.get('password', self.POSTGRES_PASSWORD)
+            secret = json.loads(response["SecretString"])
+            return secret.get("password", self.POSTGRES_PASSWORD)
         except Exception as e:
-            print(f"[ERROR] Impossible de récupérer le secret : {e}")
+            print(f"[ERROR] Failed to fetch Secrets Manager secret: {e}")
             return self.POSTGRES_PASSWORD
 
     @computed_field  # type: ignore[prop-decorator]
@@ -112,10 +126,28 @@ class Settings(BaseSettings):
     EMAILS_FROM_EMAIL: EmailStr | None = None
     EMAILS_FROM_NAME: EmailStr | None = None
 
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def cookie_domain(self) -> str | None:
+        """Shared registrable domain for API + front subdomains (e.g. .dev.piercuta.com)."""
+        if self.COOKIE_DOMAIN:
+            return self.COOKIE_DOMAIN
+        if self.ENVIRONMENT == "local":
+            return None
+        host = self.FRONTEND_HOST.replace("https://", "").replace("http://", "").split("/")[0]
+        parts = host.split(".")
+        if len(parts) >= 3:
+            return f".{'.'.join(parts[-3:])}"
+        if len(parts) == 2:
+            return f".{'.'.join(parts)}"
+        return None
+
     @model_validator(mode="after")
     def _set_default_emails_from(self) -> Self:
         if not self.EMAILS_FROM_NAME:
             self.EMAILS_FROM_NAME = self.PROJECT_NAME
+        if self.ENVIRONMENT == "local":
+            self.COOKIE_SECURE = False
         return self
 
     EMAIL_RESET_TOKEN_EXPIRE_HOURS: int = 48

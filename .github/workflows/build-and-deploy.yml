@@ -1,0 +1,108 @@
+name: Build and push to ECR
+run-name: FastAPI · build · ${{ github.ref_name }}
+
+# Build the FastAPI image and push it to ECR.
+# Argo CD Image Updater watches ECR and bumps apps/fastapi-app/values-*.yaml.
+#
+# Triggers:
+#   push `dev`         → ECR :sha + :dev
+#   push tag on `prod` → ECR :sha + :latest + :<git-tag>
+#   workflow_dispatch  → ECR push (env from ref)
+#
+# Manual fallbacks:
+#   Actions → "Deploy GitOps" / "Deploy Helm" / "Deploy Kustomize"
+#   Actions → "Migrate database"
+#
+# Vars: AWS_ROLE_ARN, AWS_REGION (default eu-west-1)
+
+on:
+  push:
+    branches:
+      - dev
+    tags:
+      - "*"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  DEPLOY_ENV: ${{ github.ref_name == 'dev' && 'dev' || 'prod' }}
+  SSM_PREFIX: ${{ github.ref_name == 'dev' && '/test-k8s/dev' || '/test-k8s/prod' }}
+  FLOATING_TAG: ${{ github.ref_name == 'dev' && 'dev' || 'latest' }}
+
+jobs:
+  build:
+    name: Build and push image
+    runs-on: ubuntu-latest
+    environment: ${{ github.ref_type == 'tag' && 'prod' || github.ref_name }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Ensure tag is on prod branch
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          set -euo pipefail
+          git fetch origin prod:refs/remotes/origin/prod
+          if ! git merge-base --is-ancestor "${GITHUB_SHA}" origin/prod; then
+            echo "Refusing prod build: tag ${GITHUB_REF_NAME} (${GITHUB_SHA}) is not on branch prod." >&2
+            echo "Create the tag from prod, e.g.: git checkout prod && git tag v1.2.3 && git push origin v1.2.3" >&2
+            exit 1
+          fi
+          echo "Tag ${GITHUB_REF_NAME} is on origin/prod — OK."
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION || 'eu-west-1' }}
+
+      - name: Read SSM parameters
+        id: ssm
+        uses: ./.github/actions/read-fastapi-ssm
+        with:
+          ssm_prefix: ${{ env.SSM_PREFIX }}
+
+      - name: Resolve image tags
+        id: meta
+        env:
+          ECR_URI: ${{ steps.ssm.outputs.ecr_uri }}
+        run: |
+          set -euo pipefail
+          {
+            echo "${ECR_URI}:${GITHUB_SHA}"
+            echo "${ECR_URI}:${FLOATING_TAG}"
+          } > /tmp/ecr-tags.txt
+
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            echo "${ECR_URI}:${GITHUB_REF_NAME}" >> /tmp/ecr-tags.txt
+            echo "image_tag=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+          else
+            echo "image_tag=${GITHUB_SHA}" >> "$GITHUB_OUTPUT"
+          fi
+
+          TAGS=$(paste -sd, /tmp/ecr-tags.txt)
+          echo "tags=${TAGS}" >> "$GITHUB_OUTPUT"
+          echo "ECR tags: ${TAGS}"
+
+      - name: Login to Amazon ECR
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build and push image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          # Plain image manifests (not OCI indexes) — required for Argo CD Image Updater.
+          provenance: false
+          sbom: false

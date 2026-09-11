@@ -1,0 +1,81 @@
+name: Bump GitOps image tag
+description: Clone the GitOps repo and update image.repository / image.tag in a values file.
+
+inputs:
+  gitops_repo:
+    description: GitOps repository SSH URL
+    required: true
+  gitops_branch:
+    description: GitOps branch to update
+    required: true
+  values_file:
+    description: Path to the values file inside the GitOps repo
+    required: true
+  ecr_uri:
+    description: ECR repository URI
+    required: true
+  image_tag:
+    description: Image tag to set
+    required: true
+  commit_message:
+    description: Git commit message
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Bump image tag in GitOps
+      shell: bash
+      env:
+        GITOPS_REPO: ${{ inputs.gitops_repo }}
+        GITOPS_BRANCH: ${{ inputs.gitops_branch }}
+        VALUES_FILE: ${{ inputs.values_file }}
+        ECR_URI: ${{ inputs.ecr_uri }}
+        IMAGE_TAG: ${{ inputs.image_tag }}
+        COMMIT_MESSAGE: ${{ inputs.commit_message }}
+      run: |
+        set -euo pipefail
+
+        if [ -z "${SSH_AUTH_SOCK:-}" ]; then
+          echo "SSH agent not loaded. Set GitHub secret GITOPS_SSH_PRIVATE_KEY." >&2
+          exit 1
+        fi
+
+        mkdir -p ~/.ssh
+        chmod 700 ~/.ssh
+        ssh-keyscan -t rsa,ecdsa,ed25519 github.com >> ~/.ssh/known_hosts 2>/dev/null
+
+        git clone --depth 1 --branch "${GITOPS_BRANCH}" "${GITOPS_REPO}" gitops-repo
+        cd gitops-repo
+
+        if [ ! -f "$VALUES_FILE" ]; then
+          echo "Missing ${VALUES_FILE} in GitOps repo (branch ${GITOPS_BRANCH})" >&2
+          exit 1
+        fi
+
+        awk -v repo="$ECR_URI" -v tag="$IMAGE_TAG" '
+          BEGIN { in_image = 0 }
+          /^image:/ { in_image = 1; print; next }
+          in_image && /^[^ ]/ { in_image = 0 }
+          in_image && /^[[:space:]]+repository:/ {
+            print "  repository: " repo
+            next
+          }
+          in_image && /^[[:space:]]+tag:/ {
+            print "  tag: \"" tag "\""
+            next
+          }
+          { print }
+        ' "$VALUES_FILE" > "${VALUES_FILE}.tmp"
+        mv "${VALUES_FILE}.tmp" "$VALUES_FILE"
+
+        git config user.email "github-actions[bot]@users.noreply.github.com"
+        git config user.name "github-actions[bot]"
+        git add "$VALUES_FILE"
+        if git diff --staged --quiet; then
+          echo "Image tag already ${IMAGE_TAG}; nothing to commit."
+          exit 0
+        fi
+        git commit -m "${COMMIT_MESSAGE}"
+        git push origin "HEAD:${GITOPS_BRANCH}"
+        echo "Pushed GitOps update; Argo CD will sync automatically."
