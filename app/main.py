@@ -1,6 +1,7 @@
 import sentry_sdk
 from fastapi import FastAPI
 from fastapi.routing import APIRoute
+from prometheus_fastapi_instrumentator import Instrumentator
 from starlette.middleware.cors import CORSMiddleware
 
 from app.api.main import api_router
@@ -33,3 +34,8 @@ if settings.all_cors_origins:
     app.add_middleware(CookieCsrfMiddleware)
 
 app.include_router(api_router, prefix=settings.API_V1_STR)
+
+# Prometheus metrics for AMP (scraped by ADOT Collector). Keep at /metrics (not under /api).
+Instrumentator(
+    should_ignore_untemplated=True,
+).instrument(app).expose(app, endpoint="/metrics", include_in_schema=False)
