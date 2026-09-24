@@ -10,7 +10,10 @@ from app.middleware.csrf import CookieCsrfMiddleware
 
 
 def custom_generate_unique_id(route: APIRoute) -> str:
-    return f"{route.tags[0]}-{route.name}"
+    # Routes without tags (e.g. /metrics) must not crash OpenAPI id generation.
+    if route.tags:
+        return f"{route.tags[0]}-{route.name}"
+    return route.name
 
 
 if settings.SENTRY_DSN and settings.ENVIRONMENT != "local":
@@ -38,4 +41,9 @@ app.include_router(api_router, prefix=settings.API_V1_STR)
 # Prometheus metrics for AMP (scraped by ADOT Collector). Keep at /metrics (not under /api).
 Instrumentator(
     should_ignore_untemplated=True,
-).instrument(app).expose(app, endpoint="/metrics", include_in_schema=False)
+).instrument(app).expose(
+    app,
+    endpoint="/metrics",
+    include_in_schema=False,
+    tags=["metrics"],
+)
